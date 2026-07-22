@@ -986,7 +986,8 @@ def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
              degreeU=1, degreeP=1, alpha=1.0, basis_kind="legendre_P",
              eps_solid=1e-6, comm=None, verbose=True, log_every=200,
              frame_callback=None, frame_every=0, probes=None,
-             obstacle_metrics=False, U_ref=1.0, D=1.0):
+             obstacle_metrics=False, obstacle_metrics_every=1,
+             U_ref=1.0, D=1.0):
     """Laço temporal genérico do MPrM para um FlowProblem. Cavidade e von
     Kármán compartilham este caminho. Devolve dict(u,v,dt,nsteps,divmax,
     defect,t_wall[,cl_history,probe_history])."""
@@ -1023,6 +1024,12 @@ def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
 
     cl_hist = []
     probe_hist = [] if probes else None
+
+    # Cache da fatoração LU da pressão diagnóstica (T5)
+    diag_solver = None
+    if obstacle_metrics and comm.rank == 0:
+        diag_solver = DiagnosticPressureSolver(problem)
+
     t0 = time.perf_counter()
     for step in range(nsteps):
         w1, w2 = mac_transport(u, v, problem, dt)
@@ -1032,8 +1039,8 @@ def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
             u, v = fine.step(w1, w2)
 
         if comm.rank == 0:
-            if obstacle_metrics and problem.solid is not None:
-                p = _diagnostic_pressure(u, v, problem, dt)
+            if obstacle_metrics and problem.solid is not None and step % obstacle_metrics_every == 0:
+                p = diag_solver.solve(u, v)
                 cd, cl = obstacle_forces(u, v, p, problem, U_ref, D)
                 cl_hist.append((dt * (step + 1), cd, cl))
             if probes:
@@ -1087,7 +1094,8 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
                    basis_kind="legendre_P", T=None, dt=None, method="mprm",
                    inflow="uniform", walls="wall", eps_solid=1e-6,
                    comm=None, verbose=True, log_every=200,
-                   probes=None, frame_callback=None, frame_every=0):
+                   probes=None, frame_callback=None, frame_every=0,
+                   obstacle_metrics_every=1):
     """Escoamento em torno de um cilindro quadrado (von Kármán, artigo §3.5).
 
     Malha global Nx=Ndom_x*nloc, Ny=Ndom_y*nloc — aqui usamos Ndom (por
@@ -1109,7 +1117,8 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
                     degreeU=degreeU, degreeP=degreeP, alpha=alpha,
                     basis_kind=basis_kind, eps_solid=eps_solid, comm=comm,
                     verbose=verbose, log_every=log_every, probes=probes,
-                    obstacle_metrics=True, U_ref=U_in, D=D,
+                    obstacle_metrics=True, obstacle_metrics_every=obstacle_metrics_every,
+                    U_ref=U_in, D=D,
                     frame_callback=frame_callback, frame_every=frame_every)
 
 
@@ -1201,119 +1210,122 @@ class ChannelFinePoisson:
         return u, v
 
 
-def _diagnostic_pressure(u, v, problem, dt):
-    """Pressão física do instante via equação de Poisson: ∇²p = -∇·((u·∇)u).
-    
-    Usa velocidades centradas na célula e diferenças finitas para o termo
-    fonte -∇·((u·∇)u). resolve com K=1 (Poisson padrão), Dirichlet p=0 na
-    saída, Neumann homogêneo nas demais fronteiras.
+class DiagnosticPressureSolver:
+    """Pressão física via equação de Poisson: ∇²p = -∇·((u·∇)u).
+
+    A matriz do sistema (geometria + BCs) é constante no tempo; montada e
+    fatorada UMA vez no __init__. A cada passo, apenas a fonte (termo
+    convectivo) é recomputada e o sistema resolvido com a fatoração cacheada.
+
+    K=1 (Poisson padrão), Dirichlet p=0 na saída, Neumann homogêneo nas
+    demais fronteiras.
     """
-    hx, hy = problem.hx, problem.hy
-    Nx, Ny = problem.Nx, problem.Ny
-    solid = problem.solid
-    
-    # Velocidade nos centros das células
-    uc = 0.5 * (u[:-1, :] + u[1:, :])        # (Nx, Ny)
-    vc = 0.5 * (v[:, :-1] + v[:, 1:])        # (Nx, Ny)
-    
-    # Gradientes nos centros (diferenças centrais, 2ª ordem)
-    dudx = np.zeros((Nx, Ny))
-    dudy = np.zeros((Nx, Ny))
-    dvdx = np.zeros((Nx, Ny))
-    dvdy = np.zeros((Nx, Ny))
-    
-    dudx[1:-1, :] = (uc[2:, :] - uc[:-2, :]) / (2 * hx)
-    dudx[0, :] = (uc[1, :] - uc[0, :]) / hx
-    dudx[-1, :] = (uc[-1, :] - uc[-2, :]) / hx
-    
-    dudy[:, 1:-1] = (uc[:, 2:] - uc[:, :-2]) / (2 * hy)
-    dudy[:, 0] = (uc[:, 1] - uc[:, 0]) / hy
-    dudy[:, -1] = (uc[:, -1] - uc[:, -2]) / hy
-    
-    dvdx[1:-1, :] = (vc[2:, :] - vc[:-2, :]) / (2 * hx)
-    dvdx[0, :] = (vc[1, :] - vc[0, :]) / hx
-    dvdx[-1, :] = (vc[-1, :] - vc[-2, :]) / hx
-    
-    dvdy[:, 1:-1] = (vc[:, 2:] - vc[:, :-2]) / (2 * hy)
-    dvdy[:, 0] = (vc[:, 1] - vc[:, 0]) / hy
-    dvdy[:, -1] = (vc[:, -1] - vc[:, -2]) / hy
-    
-    # Termo convectivo: (u·∇)u = [u*du/dx + v*du/dy, u*dv/dx + v*dv/dy]
-    conv_x = uc * dudx + vc * dudy
-    conv_y = uc * dvdx + vc * dvdy
-    
-    # Fonte: f = -∇·((u·∇)u) = -(d(conv_x)/dx + d(conv_y)/dy)
-    source = np.zeros((Nx, Ny))
-    # d(conv_x)/dx nos centros
-    source[1:-1, :] = -(conv_x[2:, :] - conv_x[:-2, :]) / (2 * hx)
-    source[0, :] = -(conv_x[1, :] - conv_x[0, :]) / hx
-    source[-1, :] = -(conv_x[-1, :] - conv_x[-2, :]) / hx
-    # d(conv_y)/dy nos centros
-    source[:, 1:-1] += -(conv_y[:, 2:] - conv_y[:, :-2]) / (2 * hy)
-    source[:, 0] += -(conv_y[:, 1] - conv_y[:, 0]) / hy
-    source[:, -1] += -(conv_y[:, -1] - conv_y[:, -2]) / hy
-    
-    # Zera fonte no sólido
-    if solid is not None:
-        source[solid] = 0.0
-    
-    # Monta e resolve o sistema de Poisson K=1
-    import scipy.sparse as sp
-    import scipy.sparse.linalg as spla
-    
-    def lid(i, j):
-        return i + j * Nx
-    
-    has_out = {s: problem.side(s).kind == "outflow"
-               for s in ("left", "right", "bottom", "top")}
-    
-    rows, cols, vals = [], [], []
-    for j in range(Ny):
-        for i in range(Nx):
-            c = lid(i, j)
-            if solid is not None and solid[i, j]:
-                rows.append(c); cols.append(c); vals.append(1.0); continue
-            diag = 0.0
-            for (di, dj, d, ln) in ((1, 0, hx, hy), (-1, 0, hx, hy),
-                                    (0, 1, hy, hx), (0, -1, hy, hx)):
-                ii, jj = i + di, j + dj
-                if 0 <= ii < Nx and 0 <= jj < Ny:
-                    if solid is None or not solid[ii, jj]:
-                        w = 1.0 * ln / d    # K=1 para Poisson físico
+
+    def __init__(self, problem):
+        import scipy.sparse as sp
+        import scipy.sparse.linalg as spla
+        self.problem = problem
+        hx, hy = problem.hx, problem.hy
+        Nx, Ny = problem.Nx, problem.Ny
+        self.hx, self.hy = hx, hy
+        self.Nx, self.Ny = Nx, Ny
+        solid = problem.solid if problem.solid is not None else np.zeros((Nx, Ny), bool)
+        self.solid = solid
+
+        has_out = {s: problem.side(s).kind == "outflow"
+                   for s in ("left", "right", "bottom", "top")}
+
+        def lid(i, j):
+            return i + j * Nx
+
+        rows, cols, vals = [], [], []
+        for j in range(Ny):
+            for i in range(Nx):
+                c = lid(i, j)
+                if solid[i, j]:
+                    rows.append(c); cols.append(c); vals.append(1.0); continue
+                diag = 0.0
+                for (di, dj, d, ln) in ((1, 0, hx, hy), (-1, 0, hx, hy),
+                                        (0, 1, hy, hx), (0, -1, hy, hx)):
+                    ii, jj = i + di, j + dj
+                    if 0 <= ii < Nx and 0 <= jj < Ny and not solid[ii, jj]:
+                        w = 1.0 * ln / d    # K=1
                         rows.append(c); cols.append(lid(ii, jj))
                         vals.append(w); diag -= w
-            # Dirichlet p=0 na saída
-            for (side, at_edge, d, ln) in (
-                    ("left", i == 0, hx, hy), ("right", i == Nx-1, hx, hy),
-                    ("bottom", j == 0, hy, hx), ("top", j == Ny-1, hy, hx)):
-                if at_edge and has_out[side]:
-                    diag -= 1.0 * ln / (0.5 * d)
-            rows.append(c); cols.append(c); vals.append(diag)
-    
-    A = sp.csr_matrix((vals, (rows, cols)), shape=(Nx * Ny, Nx * Ny)).tolil()
-    pure_neumann = not any(has_out.values())
-    if pure_neumann:
+                for (side, at_edge, d, ln) in (
+                        ("left", i == 0, hx, hy), ("right", i == Nx-1, hx, hy),
+                        ("bottom", j == 0, hy, hx), ("top", j == Ny-1, hy, hx)):
+                    if at_edge and has_out[side]:
+                        diag -= 1.0 * ln / (0.5 * d)
+                rows.append(c); cols.append(c); vals.append(diag)
+
+        A = sp.csr_matrix((vals, (rows, cols)), shape=(Nx * Ny, Nx * Ny)).tolil()
+        pure_neumann = not any(has_out.values())
+        if pure_neumann:
+            pin = int(np.argmin(solid.flatten(order="F"))) if solid.any() else 0
+            A[pin, :] = 0.0; A[pin, pin] = 1.0
+            self._pin = pin
+        self._pure_neumann = pure_neumann
+        self.lu = spla.splu(A.tocsc())
+
+    def solve(self, u, v):
+        """Resolve ∇²p = -∇·((u·∇)u) com a fatoração cacheada."""
+        hx, hy = self.hx, self.hy
+        Nx, Ny = self.Nx, self.Ny
+        solid = self.solid
+
+        uc = 0.5 * (u[:-1, :] + u[1:, :])
+        vc = 0.5 * (v[:, :-1] + v[:, 1:])
+
+        dudx = np.zeros((Nx, Ny)); dudy = np.zeros((Nx, Ny))
+        dvdx = np.zeros((Nx, Ny)); dvdy = np.zeros((Nx, Ny))
+        dudx[1:-1, :] = (uc[2:, :] - uc[:-2, :]) / (2 * hx)
+        dudx[0, :] = (uc[1, :] - uc[0, :]) / hx
+        dudx[-1, :] = (uc[-1, :] - uc[-2, :]) / hx
+        dudy[:, 1:-1] = (uc[:, 2:] - uc[:, :-2]) / (2 * hy)
+        dudy[:, 0] = (uc[:, 1] - uc[:, 0]) / hy
+        dudy[:, -1] = (uc[:, -1] - uc[:, -2]) / hy
+        dvdx[1:-1, :] = (vc[2:, :] - vc[:-2, :]) / (2 * hx)
+        dvdx[0, :] = (vc[1, :] - vc[0, :]) / hx
+        dvdx[-1, :] = (vc[-1, :] - vc[-2, :]) / hx
+        dvdy[:, 1:-1] = (vc[:, 2:] - vc[:, :-2]) / (2 * hy)
+        dvdy[:, 0] = (vc[:, 1] - vc[:, 0]) / hy
+        dvdy[:, -1] = (vc[:, -1] - vc[:, -2]) / hy
+
+        conv_x = uc * dudx + vc * dudy
+        conv_y = uc * dvdx + vc * dvdy
+
+        source = np.zeros((Nx, Ny))
+        source[1:-1, :] = -(conv_x[2:, :] - conv_x[:-2, :]) / (2 * hx)
+        source[0, :] = -(conv_x[1, :] - conv_x[0, :]) / hx
+        source[-1, :] = -(conv_x[-1, :] - conv_x[-2, :]) / hx
+        source[:, 1:-1] += -(conv_y[:, 2:] - conv_y[:, :-2]) / (2 * hy)
+        source[:, 0] += -(conv_y[:, 1] - conv_y[:, 0]) / hy
+        source[:, -1] += -(conv_y[:, -1] - conv_y[:, -2]) / hy
+
         if solid is not None:
-            pin = int(np.argmin(solid.flatten(order="F")))
-        else:
-            pin = 0
-        A[pin, :] = 0.0; A[pin, pin] = 1.0
-    
-    b = (source * hx * hy).flatten(order="F")
-    if solid is not None:
-        b[solid.flatten(order="F")] = 0.0
-    if pure_neumann:
+            source[solid] = 0.0
+
+        b = (source * hx * hy).flatten(order="F")
         if solid is not None:
-            fluid = ~solid.flatten(order="F")
+            b[solid.flatten(order="F")] = 0.0
+        if self._pure_neumann:
+            fluid = ~solid.flatten(order="F") if solid is not None else np.ones(Nx*Ny, bool)
             b[fluid] -= b[fluid].sum() / fluid.sum()
-        else:
-            b -= b.sum() / b.size
-        b[pin] = 0.0
-    
-    p = spla.splu(A.tocsc()).solve(b).reshape((Nx, Ny), order="F")
-    if solid is not None:
-        p[solid] = 0.0
-    return p
+            b[self._pin] = 0.0
+
+        p = self.lu.solve(b).reshape((Nx, Ny), order="F")
+        if solid is not None:
+            p[solid] = 0.0
+        return p
+
+
+def _diagnostic_pressure(u, v, problem, dt):
+    """Wrapper retrocompatível — usa DiagnosticPressureSolver (refatora a
+    cada chamada). Prefira instanciar DiagnosticPressureSolver e chamar
+    .solve(u,v) para reutilizar a fatoração LU."""
+    solver = DiagnosticPressureSolver(problem)
+    return solver.solve(u, v)
 
 
 def obstacle_forces(u, v, p, problem, U_ref, D):
