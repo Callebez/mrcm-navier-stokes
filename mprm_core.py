@@ -1009,7 +1009,8 @@ def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
     if dt is None:
         umax = max(U_ref, 1e-12)
         nu = max(problem.nu, 1e-12)
-        dt = 0.4 * min(hx / umax, hx * hx / (4.0 * nu))
+        h_min = min(hx, hy)
+        dt = 0.4 * min(h_min / umax, h_min * h_min / (4.0 * nu))
     nsteps = int(np.ceil(T / dt))
 
     if method == "mprm":
