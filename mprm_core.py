@@ -195,6 +195,58 @@ def von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
                        sides=sides, solid=solid)
 
 
+def assert_solid_interior_to_subdomains(solid, cfg):
+    """Garante que o obstáculo não atravessa interfaces de subdomínio:
+    nenhuma face de interface (colunas i*nlocx, linhas j*nlocy) pode separar
+    fluido de sólido de forma inconsistente — exigimos que cada célula sólida
+    e suas vizinhas na direção normal à interface estejam no mesmo subdomínio.
+    Critério prático: nenhuma interface interna corta o bounding-box do sólido.
+    """
+    if solid is None or not solid.any():
+        return
+    nx, ny = cfg.nlocx, cfg.nlocy
+    xs = np.where(solid.any(axis=1))[0]
+    ys = np.where(solid.any(axis=0))[0]
+    imin, imax = xs.min(), xs.max() + 1        # [imin, imax) em células
+    jmin, jmax = ys.min(), ys.max() + 1
+    for i in range(1, cfg.Ndomx):
+        if imin < i * nx < imax:
+            raise ValueError(
+                f"Obstáculo atravessa a interface vertical x-cel={i*nx} "
+                f"(bbox x=[{imin},{imax})). Alinhe o obstáculo ao interior "
+                f"de um subdomínio (spec §5.3, R4).")
+    for j in range(1, cfg.Ndomy):
+        if jmin < j * ny < jmax:
+            raise ValueError(
+                f"Obstáculo atravessa a interface horizontal y-cel={j*ny} "
+                f"(bbox y=[{jmin},{jmax})).")
+
+
+def _impermeable_problem(cfg) -> "FlowProblem":
+    """FlowProblem impermeável (4 paredes, sem obstáculo) coerente com o cfg —
+    o comportamento retrocompatível do projetor/downscaler."""
+    sides = {s: SideBC("wall", velocity=0.0)
+             for s in ("left", "right", "top", "bottom")}
+    return FlowProblem(Nx=cfg.Nglobx, Ny=cfg.Ngloby,
+                       Lx=cfg.Lx, Ly=cfg.Ly, nu=0.0, sides=sides)
+
+
+def _darcy_boundary_from_problem(problem) -> dict:
+    """Mapeia os lados do FlowProblem para BoundaryData do Darcy da projeção
+    (spec §4): entrada/paredes -> flux=0 (no-flow forte); saída -> pressure=0."""
+    def _zero(x, y):
+        from firedrake import Constant
+        return Constant(0.0)
+    bnd = {}
+    for s, bc in problem.sides.items():
+        if bc.kind == "outflow":
+            bnd_val = BoundaryData(pressure=_zero)
+        else:                       # wall, slip, inflow -> v·n = 0
+            bnd_val = BoundaryData(flux=_zero)
+        bnd[s] = bnd_val
+    return bnd
+
+
 # ===========================================================================
 # Transporte explícito na malha MAC (artigo §2.6, Eqs. 8/24-29)
 # ===========================================================================
@@ -368,7 +420,8 @@ class MPrMProjector:
     `comm` (isub % size), como no executor mpi do mrcm.
     """
 
-    def __init__(self, cfg: MRCMConfig, dt: float, comm=None, verbose=False):
+    def __init__(self, cfg: MRCMConfig, dt: float, problem=None,
+                 comm=None, verbose=False, eps_solid=1e-6):
         from firedrake import (Constant, FunctionSpace, TestFunction,
                                TestFunctions, Function, FacetNormal,
                                VectorFunctionSpace, SpatialCoordinate,
@@ -383,37 +436,61 @@ class MPrMProjector:
         self.cfg = cfg
         self.dt = float(dt)
         self.verbose = verbose
+        self.eps_solid = float(eps_solid)
+
+        # problem=None => cavidade impermeável (comportamento retrocompatível)
+        if problem is None:
+            problem = _impermeable_problem(cfg)
+        self.problem = problem
+        if problem.solid is not None:
+            assert_solid_interior_to_subdomains(problem.solid, cfg)
 
         self.skel = Skeleton.cartesian(cfg.Ndomx, cfg.Ndomy)
         self.dofm = DOFManager(self.skel.NGamma, cfg.ndofsU, cfg.ndofsP)
         self.my_subs = list(range(self.rank, cfg.Nsubd, self.size))
 
-        # Problema de Darcy da projeção: K = δt, fonte preenchida online,
-        # contorno impermeável (fluxo nulo ⇒ pino forte, ver apply_bc_patch).
         dt_c = self.dt
+        eps = self.eps_solid
+        solid = problem.solid
+        hx_f = cfg.Hx / cfg.nlocx
+        hy_f = cfg.Hy / cfg.nlocy
+        self.hx_f, self.hy_f = hx_f, hy_f
 
         def _K(mesh):
-            from firedrake import Constant
-            return Constant(dt_c)
+            from firedrake import (Constant, Function, FunctionSpace,
+                                   VectorFunctionSpace, SpatialCoordinate)
+            if solid is None:
+                return Constant(dt_c)
+            Kf = FunctionSpace(mesh, "DG", 0)
+            xc = Function(VectorFunctionSpace(mesh, "DG", 0)).interpolate(
+                SpatialCoordinate(mesh))
+            xcd = xc.dat.data_ro
+            ic = np.clip(np.floor(xcd[:, 0] / hx_f).astype(int),
+                         0, cfg.Nglobx - 1)
+            jc = np.clip(np.floor(xcd[:, 1] / hy_f).astype(int),
+                         0, cfg.Ngloby - 1)
+            k = Function(Kf)
+            k.dat.data[:] = np.where(solid[ic, jc], dt_c * eps, dt_c)
+            return k
 
         def _invK(mesh):
-            from firedrake import Constant
-            return Constant(1.0 / dt_c)
+            from firedrake import Constant, Function
+            if solid is None:
+                return Constant(1.0 / dt_c)
+            K = _K(mesh)
+            ik = Function(K.function_space())
+            ik.dat.data[:] = 1.0 / K.dat.data_ro
+            return ik
 
         def _zero(x, y):
             from firedrake import Constant
             return Constant(0.0)
 
-        def _noflow(x, y):
-            from firedrake import Constant
-            return Constant(0.0)
-
-        self.problem = DarcyProblem(
+        self.problem_darcy = DarcyProblem(
             Lx=cfg.Lx, Ly=cfg.Ly,
             permeability=_K, inv_permeability=_invK,
             source=_zero,
-            boundary={s: BoundaryData(flux=_noflow)
-                      for s in ("left", "right", "bottom", "top")},
+            boundary=_darcy_boundary_from_problem(problem),
         )
 
         robin = make_robin(cfg.robin_variant, cfg.alpha, *cfg.robin_L_xy(),
@@ -427,11 +504,8 @@ class MPrMProjector:
         self.L_forms = {}     # isub -> forma RHS  -f q dx
         self.cell_map = {}    # isub -> (ic, jc) índices globais de célula p/ dof DG
         self.trace = {}       # (isub, side) -> dict(form, idx, len, order, sign)
+        self.out_trace = {}   # (isub, side_name) -> dict p/ fluxo de saída
         self.uh = {}          # isub -> Function(V) para extração de traço
-
-        hx_f = cfg.Hx / cfg.nlocx
-        hy_f = cfg.Hy / cfg.nlocy
-        self.hx_f, self.hy_f = hx_f, hy_f
 
         for isub in self.my_subs:
             ix, iy = isub % cfg.Ndomx, isub // cfg.Ndomx
@@ -440,9 +514,8 @@ class MPrMProjector:
                       for s in internal_sides}
             task = {"cfg_dict": cfg.as_dict(), "isub": isub,
                     "NunkU": NunkU, "edge_l": edge_l,
-                    "problem": self.problem}
-            # Offline: MsBF + caches B1/B2 (fonte nula — descartamos a
-            # parte particular do workspace; a online é resolvida abaixo).
+                    "problem": self.problem_darcy}
+            # Offline: MsBF + caches B1/B2
             ws = build_subdomain_workspace(task)
             self.ws[isub] = ws
             mesh, V, Q = ws["mesh"], ws["V"], ws["Q"]
@@ -455,8 +528,10 @@ class MPrMProjector:
                 quadrature_degree=cfg.final_quadrature_degree(),
                 facet_quadrature_degree=cfg.final_facet_quadrature_degree(),
             )
-            bcs = _build_flux_dirichlet_bcs_allsides(W, flag_side,
-                                                     problem=self.problem)
+            # BCs nativas do mrcm (no-flow forte nos lados externos com fluxo)
+            from mrcm.local_form import build_flux_dirichlet_bcs
+            bcs = build_flux_dirichlet_bcs(W, mesh, flag_side,
+                                           problem=self.problem_darcy)
             self.solvers[isub] = LocalSolver(
                 W, a_form, bcs,
                 use_iterative=(cfg.local_solver_mode == "iterative"), cfg=cfg)
@@ -469,17 +544,13 @@ class MPrMProjector:
             Xc = VectorFunctionSpace(mesh, "DG", 0)
             xc = Function(Xc).interpolate(SpatialCoordinate(mesh))
             xcd = xc.dat.data_ro
-            # Q é DG_{mixed_order}; o mapa por ponto médio vale para DG0
-            # (mixed_order=0, caso usado aqui).
             assert cfg.mixed_order == 0, "fonte por célula requer DG0"
             ic = np.floor(xcd[:, 0] / hx_f).astype(int)
             jc = np.floor(xcd[:, 1] / hy_f).astype(int)
             self.cell_map[isub] = (np.clip(ic, 0, cfg.Nglobx - 1),
                                    np.clip(jc, 0, cfg.Ngloby - 1))
 
-            # Operadores de traço: fluxo médio por face fina de cada lado
-            # interno (base da média da Eq. 21). Trace space HDivT grau 0:
-            # 1 dof (momento ∫u·n) por faceta.
+            # Operadores de traço: fluxo médio por face fina de cada lado interno.
             T = FunctionSpace(mesh, "HDiv Trace", 0)
             tau = TestFunction(T)
             uh = Function(V)
@@ -492,7 +563,6 @@ class MPrMProjector:
                               * ds_m(marker)).dat.data_ro[idx] / ln[idx]
                 ym = assemble(SpatialCoordinate(mesh)[1] * tau
                               * ds_m(marker)).dat.data_ro[idx] / ln[idx]
-                # ordena as facetas ao longo do lado
                 coord = ym if s in (1, 3) else xm     # lados verticais: y
                 order = np.argsort(coord)
                 sign = +1.0 if s in (1, 2) else -1.0  # right/top: n = +e
@@ -501,8 +571,29 @@ class MPrMProjector:
                     "idx": idx, "len": ln[idx], "order": order, "sign": sign,
                 }
 
-        # Montador global (matriz de interface a partir de triplets — o
-        # mesmo caminho do pipeline MPI do mrcm).
+            # Traço de fluxo nas faces de SAÍDA (lado outflow externo).
+            for s_name, marker in (("left", 1), ("right", 2),
+                                   ("bottom", 3), ("top", 4)):
+                if problem.side(s_name).kind != "outflow":
+                    continue
+                flag_idx = {"bottom": 0, "right": 1, "top": 2, "left": 3}[s_name]
+                if flag_side[flag_idx]:      # só bordas externas reais
+                    continue
+                ln = assemble(tau * ds_m(marker)).dat.data_ro.copy()
+                idx = np.nonzero(np.abs(ln) > 1e-14)[0]
+                if idx.size == 0:
+                    continue
+                cm = (assemble(SpatialCoordinate(mesh)[1] * tau * ds_m(marker))
+                      .dat.data_ro[idx] / ln[idx]) if s_name in ("left", "right") \
+                    else (assemble(SpatialCoordinate(mesh)[0] * tau * ds_m(marker))
+                          .dat.data_ro[idx] / ln[idx])
+                order = np.argsort(cm)
+                sign = +1.0 if s_name in ("right", "top") else -1.0
+                self.out_trace[(isub, s_name)] = {
+                    "form": dot(uh, n_facet) * tau * ds_m(marker),
+                    "idx": idx, "len": ln[idx], "order": order, "sign": sign}
+
+        # Montador global
         self.assembler = None
         if self.rank == 0:
             self.assembler = GlobalAssembler(
@@ -513,6 +604,7 @@ class MPrMProjector:
         self.last_X = None
         self.last_pT = {}
         self.last_uT = {}
+        self.last_boundary_fluxes = {}
 
     # -- online ------------------------------------------------------------
 
@@ -586,6 +678,20 @@ class MPrMProjector:
                 sb = ix + (j - 1) * cfg.Ndomx   # subdomínio abaixo
                 st = ix + j * cfg.Ndomx
                 fluxes[("h", ix, j)] = 0.5 * (all_tr[(sb, 2)] + all_tr[(st, 0)])
+
+        # fluxos de saída (v·n reconstruído nas faces externas outflow)
+        my_out = {}
+        for isub in self.my_subs:
+            self.uh[isub].assign(self.last_uT[isub])
+            for (jsub, s_name), tr in self.out_trace.items():
+                if jsub != isub:
+                    continue
+                vals = assemble(tr["form"]).dat.data_ro[tr["idx"]]
+                my_out[(isub, s_name)] = tr["sign"] * (vals / tr["len"])[tr["order"]]
+        self.last_boundary_fluxes = {}
+        for d in comm.allgather(my_out):
+            self.last_boundary_fluxes.update(d)
+
         return fluxes
 
 
