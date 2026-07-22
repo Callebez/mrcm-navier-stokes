@@ -48,10 +48,10 @@ def _mass_balance(u, v, problem):
 def test_von_karman_quick():
     """Smoke: estrutura + conservação (rápido, sequencial)."""
     comm = get_comm()
-    # Geometria ajustada para caber no subdomínio com Ndom=2, nloc=8
     r = run_von_karman(Lx=8.0, Ly=4.0, D=1.0, xc=2.0, yc=1.0, U_in=1.0,
-                       Re=100.0, Ndom=2, nloc=8, degreeU=1, degreeP=3,
-                       T=0.3, comm=comm, verbose=False)
+                       Re=100.0, Ndomx=2, Ndomy=2, nloc=8, degreeU=1, degreeP=3,
+                       T=0.3, comm=comm, verbose=False,
+                       inflow="uniform", walls="wall")
     if comm.rank != 0:
         return
     u, v = r["u"], r["v"]
@@ -81,9 +81,9 @@ def run_study(comm, geom, Re, Ndom, nloc, degreeU, degreeP, alpha, T, dt,
                f"({Ndom*nloc}² células, {Ndom}×{Ndom} subd., "
                f"U_H,{degreeU}/P_H,{degreeP})", comm)
     t0 = time.perf_counter()
-    r = run_von_karman(**geom, Re=Re, Ndom=Ndom, nloc=nloc, degreeU=degreeU,
-                       degreeP=degreeP, alpha=alpha, T=T, dt=dt, comm=comm,
-                       verbose=verbose)
+    r = run_von_karman(**geom, Re=Re, Ndomx=Ndom, Ndomy=Ndom, nloc=nloc,
+                       degreeU=degreeU, degreeP=degreeP, alpha=alpha,
+                       T=T, dt=dt, comm=comm, verbose=verbose)
     res = {"meta": make_meta("von_karman", comm, Re=Re, Ndom=Ndom, nloc=nloc,
                              degreeU=degreeU, degreeP=degreeP, alpha=alpha,
                              T=T, dt=r["dt"], nsteps=r["nsteps"], **geom)}

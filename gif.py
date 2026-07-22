@@ -23,12 +23,12 @@ rank = comm.rank
 n_ranks = comm.size
 
 OUTDIR      = "frames_von_karman_hires"
-GIF_OUT     = "results_alpha/von_karman_U4P4_40.gif"
+GIF_OUT     = "results_alpha/von_karman_U2P2_40.gif"
 FPS         = 10
 FRAME_EVERY = 12
 Ndom, nloc  = 4, 40              # 160^2 celulas
-dU, dP      = 4, 4              # U_H,4 / P_H,4
-T           = 30.0
+dU, dP      = 2, 2              # U_H,2 / P_H,2
+T           = 50.0
 
 # I/O apenas no rank 0
 if rank == 0:
@@ -62,8 +62,9 @@ if rank == 0:
     print("=" * 60)
 
 t0 = time.perf_counter()
-r = run_von_karman(Lx=16.0, Ly=8.0, D=1.0, xc=3.0, yc=3.0, U_in=1.0, Re=100.0,
-                   Ndom=Ndom, nloc=nloc, degreeU=dU, degreeP=dP,
+r = run_von_karman(Lx=16.0, Ly=8.0, D=1.0, xc=4.0, yc=4.0, U_in=1.0, Re=100.0,
+                   Ndomx=Ndom, Ndomy=Ndom, nloc=nloc, degreeU=dU, degreeP=dP,
+                   inflow='uniform', walls='wall',
                    alpha=1.0, T=T, comm=comm, verbose=(rank == 0), log_every=500,
                    frame_callback=frame_callback, frame_every=FRAME_EVERY)
 wall_t = time.perf_counter() - t0

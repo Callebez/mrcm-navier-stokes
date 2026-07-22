@@ -203,31 +203,38 @@ def von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
                        sides=sides, solid=solid)
 
 
-def assert_solid_interior_to_subdomains(solid, cfg):
-    """Garante que o obstáculo não atravessa interfaces de subdomínio:
-    nenhuma face de interface (colunas i*nlocx, linhas j*nlocy) pode separar
-    fluido de sólido de forma inconsistente — exigimos que cada célula sólida
-    e suas vizinhas na direção normal à interface estejam no mesmo subdomínio.
-    Critério prático: nenhuma interface interna corta o bounding-box do sólido.
+def assert_solid_interior_to_subdomains(solid, cfg, strict=True):
+    """Garante que o obstáculo não atravessa interfaces de subdomínio.
+
+    Se `strict=True` (default), levanta ValueError. Se `strict=False`, apenas
+    emite warning — útil para exploração/visualização com geometria arbitrária,
+    mas os resultados perto das interfaces contaminadas serão menos precisos.
     """
+    import warnings
     if solid is None or not solid.any():
         return
     nx, ny = cfg.nlocx, cfg.nlocy
     xs = np.where(solid.any(axis=1))[0]
     ys = np.where(solid.any(axis=0))[0]
-    imin, imax = xs.min(), xs.max() + 1        # [imin, imax) em células
+    imin, imax = xs.min(), xs.max() + 1
     jmin, jmax = ys.min(), ys.max() + 1
+    msg = None
     for i in range(1, cfg.Ndomx):
         if imin < i * nx < imax:
-            raise ValueError(
-                f"Obstáculo atravessa a interface vertical x-cel={i*nx} "
-                f"(bbox x=[{imin},{imax})). Alinhe o obstáculo ao interior "
-                f"de um subdomínio (spec §5.3, R4).")
+            msg = (f"Obstáculo atravessa a interface vertical x-cel={i*nx} "
+                   f"(bbox x=[{imin},{imax})).")
     for j in range(1, cfg.Ndomy):
         if jmin < j * ny < jmax:
-            raise ValueError(
-                f"Obstáculo atravessa a interface horizontal y-cel={j*ny} "
-                f"(bbox y=[{jmin},{jmax})).")
+            msg2 = (f"Obstáculo atravessa a interface horizontal y-cel={j*ny} "
+                    f"(bbox y=[{jmin},{jmax})).")
+            msg = msg + " " + msg2 if msg else msg2
+    if msg:
+        if strict:
+            raise ValueError(msg + " Alinhe o obstáculo ao interior de um "
+                             "subdomínio ou use strict=False.")
+        else:
+            warnings.warn(msg + " Resultados perto das interfaces contaminadas "
+                          "serão menos precisos.")
 
 
 def _impermeable_problem(cfg) -> "FlowProblem":
@@ -451,7 +458,7 @@ class MPrMProjector:
             problem = _impermeable_problem(cfg)
         self.problem = problem
         if problem.solid is not None:
-            assert_solid_interior_to_subdomains(problem.solid, cfg)
+            assert_solid_interior_to_subdomains(problem.solid, cfg, strict=False)
 
         self.skel = Skeleton.cartesian(cfg.Ndomx, cfg.Ndomy)
         self.dofm = DOFManager(self.skel.NGamma, cfg.ndofsU, cfg.ndofsP)
@@ -990,7 +997,7 @@ def _sample_probe(u, v, problem, px, py):
     return 0.5 * (v[i, j] + v[i, j + 1])
 
 
-def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
+def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
              degreeU=1, degreeP=1, alpha=1.0, basis_kind="legendre_P",
              eps_solid=1e-6, comm=None, verbose=True, log_every=200,
              frame_callback=None, frame_every=0, probes=None,
@@ -1014,7 +1021,7 @@ def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
     nsteps = int(np.ceil(T / dt))
 
     if method == "mprm":
-        cfg = MRCMConfig(Ndomx=Ndom, Ndomy=Ndom, nlocx=nloc, nlocy=nloc,
+        cfg = MRCMConfig(Ndomx=Ndomx, Ndomy=Ndomy, nlocx=nloc, nlocy=nloc,
                          degreeU=degreeU, degreeP=degreeP, alpha=alpha,
                          basis_kind=basis_kind, Lx=problem.Lx, Ly=problem.Ly,
                          mixed_family="BDM", mixed_order=0,
@@ -1094,7 +1101,7 @@ def run_cavity(Re=100.0, Ndom=3, nloc=16, T=8.0, dt=None, lid_velocity=1.0,
     if dt is None:
         hx = 1.0 / N
         dt = 0.4 * min(hx / lid_velocity, hx * hx / (4.0 * (lid_velocity / Re)))
-    return run_flow(problem, Ndom, nloc, T, dt=dt, method=method,
+    return run_flow(problem, Ndom, Ndom, nloc, T, dt=dt, method=method,
                     degreeU=degreeU, degreeP=degreeP, alpha=alpha,
                     basis_kind=basis_kind, comm=comm, verbose=verbose,
                     log_every=log_every, frame_callback=frame_callback,
@@ -1102,7 +1109,8 @@ def run_cavity(Re=100.0, Ndom=3, nloc=16, T=8.0, dt=None, lid_velocity=1.0,
 
 
 def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
-                   Ndom=None, nloc=None, degreeU=1, degreeP=3, alpha=1.0,
+                   Ndomx=None, Ndomy=None, nloc=None,
+                   degreeU=1, degreeP=3, alpha=1.0,
                    basis_kind="legendre_P", T=None, dt=None, method="mprm",
                    inflow="parabolic", walls="slip", inflow_norm="max",
                    eps_solid=1e-6,
@@ -1111,23 +1119,23 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
                    obstacle_metrics_every=1):
     """Escoamento em torno de um cilindro quadrado (von Kármán, artigo §3.5).
 
-    Malha global Nx=Ndom_x*nloc, Ny=Ndom_y*nloc — aqui usamos Ndom (por
-    direção) e nloc iguais; ajuste `nloc`/`Ndom` para caber o domínio
-    retangular (Nx/Ny ≈ Lx/Ly). Espaços default (degreeU=1,degreeP=3)
-    seguem a recomendação do artigo p/ escoamento transiente (pressão rica).
-    Devolve o dict de run_flow + cl_history (t,Cd,Cl) e probe_history.
+    Malha global Nx = Ndomx * nloc, Ny = Ndomy * nloc.
+    Use Ndomx = 2*Ndomy para células quadradas (hx = hy) num domínio 2:1.
+    Exemplo canônico: Ndomx=10, Ndomy=5, nloc=30 → 300×150, h=0.053,
+    obstáculo centrado em (4,4) com D=1 (cabe no subdomínio).
     """
-    assert Ndom is not None and nloc is not None, "Ndom e nloc obrigatórios"
-    Nx = Ny = Ndom * nloc
-    # ajusta a razão de células ao domínio (mantém subdomínios quadrados em H)
+    assert Ndomx is not None and Ndomy is not None and nloc is not None, \
+        "Ndomx, Ndomy e nloc são obrigatórios"
+    Nx = Ndomx * nloc
+    Ny = Ndomy * nloc
     problem = von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
                                  inflow=inflow, walls=walls,
                                  inflow_norm=inflow_norm)
     if T is None:
         T = 40.0 * D / U_in
     if probes is None:
-        probes = [(xc + 3.0 * D, yc)]      # sonda de esteira default
-    return run_flow(problem, Ndom, nloc, T, dt=dt, method=method,
+        probes = [(xc + 3.0 * D, yc)]
+    return run_flow(problem, Ndomx, Ndomy, nloc, T, dt=dt, method=method,
                     degreeU=degreeU, degreeP=degreeP, alpha=alpha,
                     basis_kind=basis_kind, eps_solid=eps_solid, comm=comm,
                     verbose=verbose, log_every=log_every, probes=probes,
