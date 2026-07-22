@@ -1,0 +1,6 @@
+{
+    "python.defaultInterpreterPath": "/home/callebez/venv-firedrake/bin/python",
+    "python.terminal.activateEnvironment": false,
+    "jupyter.jupyterServerType": "local",
+    "jupyter.kernelSpecFile": "/home/callebez/.local/share/jupyter/kernels/firedrake/kernel.json"
+}
