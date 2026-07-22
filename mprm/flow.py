@@ -183,6 +183,7 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
     else:
         fine = ChannelFinePoisson(problem, dt)
         projector = None
+        downscaler = None
 
     u = np.zeros((Nx + 1, Ny)); v = np.zeros((Nx, Ny + 1))
     # inicializa a entrada em w* (campo inicial = perfil de entrada nas faces)
