@@ -56,7 +56,42 @@ def _tangential_ghost(interior, side_bc: SideBC):
     return interior          # slip, outflow: gradiente tangencial nulo
 
 
-def mac_transport(u, v, problem: "FlowProblem", dt):
+def _minmod(a, b):
+    """Minmod limiter: 0 se sinais opostos, senão menor em magnitude."""
+    return np.where(a * b > 0, np.where(np.abs(a) < np.abs(b), a, b), 0.0)
+
+
+def _superbee(a, b):
+    """Superbee limiter: maximiza o gradiente dentro do regime TVD."""
+    s = np.where(a * b > 0, np.where(np.abs(a) < np.abs(b), a, b), 0.0)
+    return np.where(np.abs(a) < np.abs(b),
+                    np.where(2*np.abs(a) < np.abs(b), 2*a, b),
+                    np.where(2*np.abs(b) < np.abs(a), 2*b, a))
+
+
+def _tvdupx(phi, vel_sign):
+    """Interpolação TVD 2ª ordem na direção x. phi shape (Nx+1, Ny)."""
+    result = np.where(vel_sign >= 0, phi[:-1, :], phi[1:, :])  # fallback 1ª ordem
+    pos = vel_sign >= 0
+    slope = _minmod(phi[1:-1, :] - phi[:-2, :], phi[2:, :] - phi[1:-1, :])
+    result[1:, :] = np.where(pos[1:, :], phi[1:-1, :] + 0.5 * slope, result[1:, :])
+    neg = ~pos
+    result[:-1, :] = np.where(neg[:-1, :], phi[1:-1, :] - 0.5 * slope, result[:-1, :])
+    return result
+
+
+def _tvdupy(phi, vel_sign):
+    """Interpolação TVD 2ª ordem na direção y. phi shape (Nx, Ny+1)."""
+    result = np.where(vel_sign >= 0, phi[:, :-1], phi[:, 1:])  # fallback 1ª ordem
+    pos = vel_sign >= 0
+    slope = _minmod(phi[:, 1:-1] - phi[:, :-2], phi[:, 2:] - phi[:, 1:-1])
+    result[:, 1:] = np.where(pos[:, 1:], phi[:, 1:-1] + 0.5 * slope, result[:, 1:])
+    neg = ~pos
+    result[:, :-1] = np.where(neg[:, :-1], phi[:, 1:-1] - 0.5 * slope, result[:, :-1])
+    return result
+
+
+def mac_transport(u, v, problem: "FlowProblem", dt, convective_order=2):
     """Velocidade tentativa w* = uⁿ + δt(−∇·(uu) + ν∇²u + f) na malha MAC,
     para um `FlowProblem` arbitrário (contorno + obstáculo).
 
@@ -79,14 +114,16 @@ def mac_transport(u, v, problem: "FlowProblem", dt):
     vg[-1, :] = _tangential_ghost(v[-1, :], S["right"])
 
     w1 = u.copy(); w2 = v.copy()
+    order = convective_order
 
     # ---- componente x (faces internas i=1..Nx-1) ----
     ue = 0.5 * (u[1:, :] + u[:-1, :])
-    Fuu = np.where(ue >= 0.0, u[:-1, :], u[1:, :]) * ue
+    u_face = _tvdupx(u, ue) if order >= 2 else np.where(ue >= 0.0, u[:-1, :], u[1:, :])
+    Fuu = u_face * ue
     dudx_conv = (Fuu[1:, :] - Fuu[:-1, :]) / hx
     v_at_corner = 0.5 * (vg[1:-2, :] + vg[2:-1, :])
-    u_upw_y = np.where(v_at_corner >= 0.0, ug[1:-1, :-1], ug[1:-1, 1:])
-    Fuv = u_upw_y * v_at_corner
+    u_corner = _tvdupy(ug[1:-1, :], v_at_corner) if order >= 2 else np.where(v_at_corner >= 0.0, ug[1:-1, :-1], ug[1:-1, 1:])
+    Fuv = u_corner * v_at_corner
     duvdy = (Fuv[:, 1:] - Fuv[:, :-1]) / hy
     lap_u = ((ug[2:, 1:-1] - 2.0 * ug[1:-1, 1:-1] + ug[:-2, 1:-1]) / hx**2
              + (ug[1:-1, 2:] - 2.0 * ug[1:-1, 1:-1] + ug[1:-1, :-2]) / hy**2)
@@ -95,11 +132,12 @@ def mac_transport(u, v, problem: "FlowProblem", dt):
 
     # ---- componente y (faces internas j=1..Ny-1) ----
     vc = 0.5 * (v[:, 1:] + v[:, :-1])
-    Fvv = np.where(vc >= 0.0, v[:, :-1], v[:, 1:]) * vc
+    v_face = _tvdupy(v, vc) if order >= 2 else np.where(vc >= 0.0, v[:, :-1], v[:, 1:])
+    Fvv = v_face * vc
     dvdy_conv = (Fvv[:, 1:] - Fvv[:, :-1]) / hy
     u_at_corner = 0.5 * (ug[:, 1:-2] + ug[:, 2:-1])
-    v_upw_x = np.where(u_at_corner >= 0.0, vg[:-1, 1:-1], vg[1:, 1:-1])
-    Fvu = v_upw_x * u_at_corner
+    v_corner = _tvdupx(vg[:, 1:-1], u_at_corner) if order >= 2 else np.where(u_at_corner >= 0.0, vg[:-1, 1:-1], vg[1:, 1:-1])
+    Fvu = v_corner * u_at_corner
     duvdx = (Fvu[1:, :] - Fvu[:-1, :]) / hx
     lap_v = ((vg[2:, 1:-1] - 2.0 * vg[1:-1, 1:-1] + vg[:-2, 1:-1]) / hx**2
              + (vg[1:-1, 2:] - 2.0 * vg[1:-1, 1:-1] + vg[1:-1, :-2]) / hy**2)
@@ -165,7 +203,7 @@ def mac_wstar(u, v, hx, hy, dt, nu, lid_velocity=1.0):
     }
     prob = FlowProblem(Nx=Nx, Ny=Ny, Lx=Nx * hx, Ly=Ny * hy,
                        nu=nu, sides=sides)
-    return mac_transport(u, v, prob, dt)
+    return mac_transport(u, v, prob, dt, convective_order=1)
 
 
 def mac_divergence(w1, w2, hx, hy):

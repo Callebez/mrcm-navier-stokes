@@ -153,7 +153,7 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
              eps_solid=1e-6, comm=None, verbose=True, log_every=200,
              frame_callback=None, frame_every=0, probes=None,
              obstacle_metrics=False, obstacle_metrics_every=1,
-             U_ref=1.0, D=1.0):
+             convective_order=2, U_ref=1.0, D=1.0):
     """Laço temporal genérico do MPrM para um FlowProblem. Cavidade e von
     Kármán compartilham este caminho. Devolve dict(u,v,dt,nsteps,divmax,
     defect,t_wall[,cl_history,probe_history])."""
@@ -187,7 +187,7 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
 
     u = np.zeros((Nx + 1, Ny)); v = np.zeros((Nx, Ny + 1))
     # inicializa a entrada em w* (campo inicial = perfil de entrada nas faces)
-    w1_0, w2_0 = mac_transport(u, v, problem, dt)
+    w1_0, w2_0 = mac_transport(u, v, problem, dt, convective_order=convective_order)
     u = _seed_inflow(u, w1_0, problem)
 
     cl_hist = []
@@ -201,7 +201,7 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
     t0 = time.perf_counter()
     u_prev, v_prev = u.copy(), v.copy()  # para termo transiente nas forças
     for step in range(nsteps):
-        w1, w2 = mac_transport(u, v, problem, dt)
+        w1, w2 = mac_transport(u, v, problem, dt, convective_order=convective_order)
         if method == "mprm":
             u, v = mprm_projection_step(w1, w2, projector, downscaler)
         else:
