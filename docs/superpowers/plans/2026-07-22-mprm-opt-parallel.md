@@ -18,6 +18,115 @@ em um pacote `mprm/` com submódulos testáveis independentemente.
 
 ---
 
+## Objetivos detalhados e justificativas das soluções
+
+### Objetivo 1 — Acurácia física ($C_D$, $C_L$, $St$)
+
+**Problema atual:** O benchmark de von Kármán reporta $C_D \approx 1.19$, enquanto
+o artigo de Lages (§3.5, Tabela 3) obtém $C_D = 1.33$ na malha fina e
+$1.33$–$1.35$ com MPrM. O déficit de ~11% tem três causas identificadas:
+
+1. **Termo viscoso ausente** em `obstacle_forces` (doc 07 §B): a integral de
+   superfície usa apenas $\text{conv} + p$, omitindo
+   $\nu(\nabla u + \nabla u^\top)\cdot n$. Em Re=100, a fração viscosa do
+   arrasto num corpo rombudo é ~15–20% do total — consistente com o déficit
+   observado ($1.19 / 1.33 \approx 0.89$).
+2. **Termo transiente ausente**: $\frac{d}{dt}\int_{VC} u\,dV$ não é
+   contabilizado. Na média temporal anula-se (ok para $\bar C_D$), mas
+   **distorce a amplitude instantânea de $C_L$** — exatamente a quantidade que
+   aparece subestimada (0.13 rms vs 0.26 amplitude do artigo).
+3. **Setup físico divergente** (doc 07 §C): perfil uniforme em vez de
+   parabólico, paredes no-slip em vez de free-slip, $U_{ref}$ normalizado pela
+   média em vez do máximo.
+
+**Por que a solução funciona:** A inclusão do tensor viscoso completo
+$\sigma = -pI + \nu(\nabla u + \nabla u^\top)$ é a definição padrão de forças
+em CFD (Eq. 43 do artigo). O balanço de volume de controle com o termo
+transiente é uma identidade exata (teorema do transporte de Reynolds). A
+correção do setup (parabólico, free-slip) alinha as condições de contorno ao
+benchmark de referência (Breuer et al. 2000).
+
+**Estratégia de validação:** Teste com escoamento de Couette analítico
+($u = U y/H$, $p = 0$), onde a força viscosa na placa é $\tau = \mu U/H$. Se
+`obstacle_forces` não recuperar este valor com < 1% de erro, o sinal ou a
+magnitude do termo viscoso está errado. Teste complementar: acelerar um fluido
+em repouso com $\partial u/\partial t = \text{const}$ — o termo transiente deve
+capturar exatamente $\rho \dot{u} V$.
+
+### Objetivo 2 — Strouhal confiável
+
+**Problema atual:** `strouhal()` usa `rfft` sem zero-padding, resultando em
+resolução $\Delta f = 1/(N_{used} \cdot dt)$. Com $T=60$ e $dt=0.133$, temos
+$\Delta St = 0.033$. O valor físico $St=0.121$ cai entre bins (0.100 e 0.133),
+e o código reporta 0.133 — um artefato da grade da FFT, não física.
+
+**Por que a solução funciona:** Zero-padding ($pad=8\times$) reduz o
+espaçamento para $\Delta f_{pad} = \Delta f / pad = 0.004$. Interpolação
+parabólica de 3 pontos refina o pico para resolução sub-bin. Combinados,
+resolvem $St=0.121 \pm 0.002$, suficiente para distinguir tendências físicas
+(como variação com Re).
+
+**Estratégia de validação:** Sinal sintético $y = \sin(2\pi \cdot 0.121 \cdot t)$
+amostrado com $dt=0.01$, $T=200$. `strouhal` deve retornar $0.121 \pm 0.003$.
+Se retornar $0.133$ (bin antigo), o zero-padding não está sendo aplicado
+corretamente. Se retornar $0.121$ mas com viés > 0.005, a interpolação
+parabólica precisa de ajuste.
+
+### Objetivo 3 — Desempenho (cache + subamostragem + ThreadPool)
+
+**Problema atual:** Perfil de 118s para $64^2$, $T=50$ mostra três gargalos
+não-paralelizados que somam ~60% do tempo (doc 10 §5).
+
+**Por que as soluções funcionam:**
+
+- **Cache LU (T5):** A matriz do Poisson diagnóstico é constante (geometria e
+  BCs fixas). Refatorar `splu(A)` uma vez em vez de 500 vezes elimina
+  $500 \times O(N^3)$ trabalho redundante. `ChannelFinePoisson` já faz isso —
+  é o mesmo padrão, aplicado ao Poisson diagnóstico. Ganho: ~25% do tempo total.
+
+- **Subamostragem (T8):** Para extrair $C_D$ e $St$, não é necessário calcular
+  pressão e forças a **cada** $\Delta t$. Amostrar a cada 5 passos reduz o custo
+  do diagnóstico em $5\times$ sem perda estatística significativa (a frequência
+  de Nyquist para $St \approx 0.12$ é $f_s > 0.24$, e $1/(5\Delta t) \approx 1.5$
+  com $\Delta t \approx 0.13$ — muito acima). Ganho: ~20% do tempo total.
+
+- **ThreadPool (T6):** Cada patch do downscaler resolve um sistema de Neumann
+  independente. `scipy.splu.solve()` libera o GIL (chama código C do UMFPACK).
+  Com 4 threads e $N_{dom}=4$, os 16 patches são processados em ~4 lotes em vez
+  de 16 sequenciais. Ganho: ~15% do tempo total.
+
+- **MPI executor (T7):** A montagem e solução do sistema global de interface
+  $(144 \times 144$ para $N_{dom}=4$, $U_{H,3}/P_{H,3})$ é feita apenas no
+  rank 0. Com `executor_kind="mpi"`, o `mrcm` distribui esta etapa. Ganho:
+  ~10% do tempo total com 4 ranks.
+
+**Estratégia de validação:** Cada otimização é testada isoladamente:
+- T5: `DiagnosticPressureSolver` produz o mesmo `p` que `_diagnostic_pressure`
+  original (assert `allclose`).
+- T6: Downscaler com 4 threads produz o mesmo `vt1, vt2` que sequencial (assert
+  `allclose`).
+- T7: `mpiexec -n 2` produz mesmos `fluxes` que sequencial.
+- T8: `C_D` e $St$ com `every=5` diferem de `every=1` por < 1% (teste
+  estatístico com tolerância).
+
+### Objetivo 4 — Modularização
+
+**Problema atual:** `mprm_core.py` tem ~1400 linhas misturando 7
+responsabilidades (transporte, projeção, downscaling, forças, benchmarks, viz,
+paralelismo). Difícil de testar isoladamente, impossível de manter.
+
+**Por que a solução funciona:** O acoplamento entre componentes já é bem
+definido: `FlowProblem` → `mac_transport` → `MPrMProjector` → `MACDownscaler` →
+`run_flow`. Cada componente depende apenas do anterior na cadeia. A extração em
+submódulos espelha este DAG natural, sem dependências circulares.
+
+**Estratégia de validação:** Testes existentes continuam passando após a
+modularização (mesmos imports, mesmos resultados). Novo teste
+`test_mprm_package.py` verifica que `import mprm` disponibiliza a API pública
+completa sem puxar Firedrake.
+
+---
+
 ## Estrutura de arquivos (alvo)
 
 ```
