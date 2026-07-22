@@ -153,7 +153,7 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
              eps_solid=1e-6, comm=None, verbose=True, log_every=200,
              frame_callback=None, frame_every=0, probes=None,
              obstacle_metrics=False, obstacle_metrics_every=1,
-             convective_order=2, U_ref=1.0, D=1.0):
+             convective_order=2, limiter="minmod", U_ref=1.0, D=1.0):
     """Laço temporal genérico do MPrM para um FlowProblem. Cavidade e von
     Kármán compartilham este caminho. Devolve dict(u,v,dt,nsteps,divmax,
     defect,t_wall[,cl_history,probe_history])."""
@@ -187,7 +187,7 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
 
     u = np.zeros((Nx + 1, Ny)); v = np.zeros((Nx, Ny + 1))
     # inicializa a entrada em w* (campo inicial = perfil de entrada nas faces)
-    w1_0, w2_0 = mac_transport(u, v, problem, dt, convective_order=convective_order)
+    w1_0, w2_0 = mac_transport(u, v, problem, dt, convective_order=convective_order, limiter=limiter)
     u = _seed_inflow(u, w1_0, problem)
 
     cl_hist = []
@@ -201,7 +201,7 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
     t0 = time.perf_counter()
     u_prev, v_prev = u.copy(), v.copy()  # para termo transiente nas forças
     for step in range(nsteps):
-        w1, w2 = mac_transport(u, v, problem, dt, convective_order=convective_order)
+        w1, w2 = mac_transport(u, v, problem, dt, convective_order=convective_order, limiter=limiter)
         if method == "mprm":
             u, v = mprm_projection_step(w1, w2, projector, downscaler)
         else:
@@ -268,7 +268,7 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
                    eps_solid=1e-6,
                    comm=None, verbose=True, log_every=200,
                    probes=None, frame_callback=None, frame_every=0,
-                   obstacle_metrics_every=1):
+                   obstacle_metrics_every=1, limiter="minmod"):
     """Escoamento em torno de um cilindro quadrado (von Kármán, artigo §3.5).
 
     Malha global Nx = Ndomx * nloc, Ny = Ndomy * nloc.
@@ -292,6 +292,7 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
                     basis_kind=basis_kind, eps_solid=eps_solid, comm=comm,
                     verbose=verbose, log_every=log_every, probes=probes,
                     obstacle_metrics=True, obstacle_metrics_every=obstacle_metrics_every,
+                    convective_order=2, limiter=limiter,
                     U_ref=U_in, D=D,
                     frame_callback=frame_callback, frame_every=frame_every)
 
