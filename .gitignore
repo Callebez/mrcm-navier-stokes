@@ -1,0 +1,8 @@
+results_alpha/
+frames_mprm/
+*.gif
+*.png
+*.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.DS_Store
