@@ -1202,11 +1202,117 @@ class ChannelFinePoisson:
 
 
 def _diagnostic_pressure(u, v, problem, dt):
-    """Pressão física do instante: projeta a velocidade atual (já ~solenoidal)
-    num Poisson mascarado e devolve p (= potencial/δt·δt ... aqui p tal que
-    δt∇²p=∇·w*). Usa ChannelFinePoisson sobre (u,v) como w*."""
-    fp = ChannelFinePoisson(problem, dt)
-    _, _, p = fp.solve(u, v)
+    """Pressão física do instante via equação de Poisson: ∇²p = -∇·((u·∇)u).
+    
+    Usa velocidades centradas na célula e diferenças finitas para o termo
+    fonte -∇·((u·∇)u). resolve com K=1 (Poisson padrão), Dirichlet p=0 na
+    saída, Neumann homogêneo nas demais fronteiras.
+    """
+    hx, hy = problem.hx, problem.hy
+    Nx, Ny = problem.Nx, problem.Ny
+    solid = problem.solid
+    
+    # Velocidade nos centros das células
+    uc = 0.5 * (u[:-1, :] + u[1:, :])        # (Nx, Ny)
+    vc = 0.5 * (v[:, :-1] + v[:, 1:])        # (Nx, Ny)
+    
+    # Gradientes nos centros (diferenças centrais, 2ª ordem)
+    dudx = np.zeros((Nx, Ny))
+    dudy = np.zeros((Nx, Ny))
+    dvdx = np.zeros((Nx, Ny))
+    dvdy = np.zeros((Nx, Ny))
+    
+    dudx[1:-1, :] = (uc[2:, :] - uc[:-2, :]) / (2 * hx)
+    dudx[0, :] = (uc[1, :] - uc[0, :]) / hx
+    dudx[-1, :] = (uc[-1, :] - uc[-2, :]) / hx
+    
+    dudy[:, 1:-1] = (uc[:, 2:] - uc[:, :-2]) / (2 * hy)
+    dudy[:, 0] = (uc[:, 1] - uc[:, 0]) / hy
+    dudy[:, -1] = (uc[:, -1] - uc[:, -2]) / hy
+    
+    dvdx[1:-1, :] = (vc[2:, :] - vc[:-2, :]) / (2 * hx)
+    dvdx[0, :] = (vc[1, :] - vc[0, :]) / hx
+    dvdx[-1, :] = (vc[-1, :] - vc[-2, :]) / hx
+    
+    dvdy[:, 1:-1] = (vc[:, 2:] - vc[:, :-2]) / (2 * hy)
+    dvdy[:, 0] = (vc[:, 1] - vc[:, 0]) / hy
+    dvdy[:, -1] = (vc[:, -1] - vc[:, -2]) / hy
+    
+    # Termo convectivo: (u·∇)u = [u*du/dx + v*du/dy, u*dv/dx + v*dv/dy]
+    conv_x = uc * dudx + vc * dudy
+    conv_y = uc * dvdx + vc * dvdy
+    
+    # Fonte: f = -∇·((u·∇)u) = -(d(conv_x)/dx + d(conv_y)/dy)
+    source = np.zeros((Nx, Ny))
+    # d(conv_x)/dx nos centros
+    source[1:-1, :] = -(conv_x[2:, :] - conv_x[:-2, :]) / (2 * hx)
+    source[0, :] = -(conv_x[1, :] - conv_x[0, :]) / hx
+    source[-1, :] = -(conv_x[-1, :] - conv_x[-2, :]) / hx
+    # d(conv_y)/dy nos centros
+    source[:, 1:-1] += -(conv_y[:, 2:] - conv_y[:, :-2]) / (2 * hy)
+    source[:, 0] += -(conv_y[:, 1] - conv_y[:, 0]) / hy
+    source[:, -1] += -(conv_y[:, -1] - conv_y[:, -2]) / hy
+    
+    # Zera fonte no sólido
+    if solid is not None:
+        source[solid] = 0.0
+    
+    # Monta e resolve o sistema de Poisson K=1
+    import scipy.sparse as sp
+    import scipy.sparse.linalg as spla
+    
+    def lid(i, j):
+        return i + j * Nx
+    
+    has_out = {s: problem.side(s).kind == "outflow"
+               for s in ("left", "right", "bottom", "top")}
+    
+    rows, cols, vals = [], [], []
+    for j in range(Ny):
+        for i in range(Nx):
+            c = lid(i, j)
+            if solid is not None and solid[i, j]:
+                rows.append(c); cols.append(c); vals.append(1.0); continue
+            diag = 0.0
+            for (di, dj, d, ln) in ((1, 0, hx, hy), (-1, 0, hx, hy),
+                                    (0, 1, hy, hx), (0, -1, hy, hx)):
+                ii, jj = i + di, j + dj
+                if 0 <= ii < Nx and 0 <= jj < Ny:
+                    if solid is None or not solid[ii, jj]:
+                        w = 1.0 * ln / d    # K=1 para Poisson físico
+                        rows.append(c); cols.append(lid(ii, jj))
+                        vals.append(w); diag -= w
+            # Dirichlet p=0 na saída
+            for (side, at_edge, d, ln) in (
+                    ("left", i == 0, hx, hy), ("right", i == Nx-1, hx, hy),
+                    ("bottom", j == 0, hy, hx), ("top", j == Ny-1, hy, hx)):
+                if at_edge and has_out[side]:
+                    diag -= 1.0 * ln / (0.5 * d)
+            rows.append(c); cols.append(c); vals.append(diag)
+    
+    A = sp.csr_matrix((vals, (rows, cols)), shape=(Nx * Ny, Nx * Ny)).tolil()
+    pure_neumann = not any(has_out.values())
+    if pure_neumann:
+        if solid is not None:
+            pin = int(np.argmin(solid.flatten(order="F")))
+        else:
+            pin = 0
+        A[pin, :] = 0.0; A[pin, pin] = 1.0
+    
+    b = (source * hx * hy).flatten(order="F")
+    if solid is not None:
+        b[solid.flatten(order="F")] = 0.0
+    if pure_neumann:
+        if solid is not None:
+            fluid = ~solid.flatten(order="F")
+            b[fluid] -= b[fluid].sum() / fluid.sum()
+        else:
+            b -= b.sum() / b.size
+        b[pin] = 0.0
+    
+    p = spla.splu(A.tocsc()).solve(b).reshape((Nx, Ny), order="F")
+    if solid is not None:
+        p[solid] = 0.0
     return p
 
 

@@ -29,7 +29,10 @@ from mprm_core import (run_von_karman, strouhal, von_karman_problem,
                        mac_divergence, solid_faces)
 
 # Geometria default do benchmark (canal com cilindro quadrado).
-DEFAULT_GEOM = dict(Lx=16.0, Ly=8.0, D=1.0, xc=4.0, yc=4.0, U_in=1.0)
+# NOTA: xc,yc devem ficar no interior de um subdomínio (sem cruzar interfaces).
+# Para Ndom=4 com Lx=16: subdomínios em x=[0,4),[4,8),[8,12),[12,16].
+# Obstáculo centrado em xc=3.0 cabe no 1º subdomínio ([2.5,3.5] ⊂ [0,4)).
+DEFAULT_GEOM = dict(Lx=16.0, Ly=8.0, D=1.0, xc=3.0, yc=3.0, U_in=1.0)
 
 
 def _mass_balance(u, v, problem):
@@ -46,7 +49,6 @@ def test_von_karman_quick():
     """Smoke: estrutura + conservação (rápido, sequencial)."""
     comm = get_comm()
     # Geometria ajustada para caber no subdomínio com Ndom=2, nloc=8
-    # (interface em y=8*hy=2.0, obstáculo em y<2.0)
     r = run_von_karman(Lx=8.0, Ly=4.0, D=1.0, xc=2.0, yc=1.0, U_in=1.0,
                        Re=100.0, Ndom=2, nloc=8, degreeU=1, degreeP=3,
                        T=0.3, comm=comm, verbose=False)
@@ -107,10 +109,15 @@ def plot_shedding(res, geom, outdir):
     Nx = u.shape[0] - 1; Ny = v.shape[1] - 1
     hx = geom["Lx"] / Nx; hy = geom["Ly"] / Ny
     xc = (np.arange(Nx) + 0.5) * hx; yc = (np.arange(Ny) + 0.5) * hy
-    uc = 0.5 * (u[:-1, :] + u[1:, :]); vc = 0.5 * (v[:, :-1] + v[:, 1:])
-    vort = ((v[1:, :] - v[:-1, :]) / hx)[:, :-1] - ((u[:, 1:] - u[:, :-1]) / hy)[:-1, :]
+    # Vorticidade nos centros das células interiores
+    dvdx = (v[1:, :] - v[:-1, :]) / hx      # (Nx-1, Ny+1)
+    dudy = (u[:, 1:] - u[:, :-1]) / hy       # (Nx+1, Ny-1)
+    vort = dvdx[:, 1:-1] - dudy[1:-1, :]     # (Nx-1, Ny-1)
+    # xc_vort, yc_vort são os centros das células interiores
+    xc_v = (np.arange(1, Nx) + 0.5) * hx
+    yc_v = (np.arange(1, Ny) + 0.5) * hy
     fig, ax = plt.subplots(figsize=(10, 5))
-    im = ax.pcolormesh(xc[:-1], yc[:-1], vort.T, shading="auto",
+    im = ax.pcolormesh(xc_v, yc_v, vort.T, shading="auto",
                        cmap="RdBu_r", vmin=-2, vmax=2)
     ax.add_patch(plt.Rectangle((geom["xc"] - geom["D"] / 2,
                                 geom["yc"] - geom["D"] / 2),
@@ -129,16 +136,20 @@ def main(argv=None):
                             T=60.0, outdir=DEFAULT_OUTDIR)
     args = parse_args("von Kármán (cilindro quadrado) — MPrM", defaults=defaults,
                       argv=argv)
+    geom = dict(DEFAULT_GEOM)
     if args.quick:
         Ndom, nloc, T = 2, 8, 1.0
+        # Ajusta geometria para caber no subdomínio com Ndom=2
+        geom["yc"] = 1.0  # longe da interface y=4.0
+        geom["xc"] = 2.0  # longe da interface x=8.0
     else:
         Ndom, nloc, T = args.Ndom, args.nloc, args.T
     comm = get_comm()
-    res = run_study(comm, DEFAULT_GEOM, args.Re, Ndom, nloc, args.degreeU,
+    res = run_study(comm, geom, args.Re, Ndom, nloc, args.degreeU,
                     args.degreeP, args.alpha, T, args.dt, verbose=args.verbose)
     if comm.rank == 0:
         outdir = args.outdir
-        fig = plot_shedding(res, DEFAULT_GEOM, outdir)
+        fig = plot_shedding(res, geom, outdir)
         save_json(res, outdir, "von_karman.json")
         m = res.get("metrics", {})
         print(f"\nC_D={m.get('Cd_mean', float('nan')):.4f}  "
