@@ -1113,6 +1113,161 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
                     frame_callback=frame_callback, frame_every=frame_every)
 
 
+# ===========================================================================
+# Referência fina mascarada + diagnósticos (von Kármán)
+# ===========================================================================
+
+class ChannelFinePoisson:
+    """Poisson MAC global mascarado para o passo de projeção de referência.
+
+    Entrada/paredes/slip: Neumann homogêneo (v·n=0). Saída: Dirichlet p=0.
+    Obstáculo: células sólidas excluídas (p=0), faces sólidas no-flow.
+    Serve (a) como referência fina de von Kármán e (b) como fonte de pressão
+    física para as forças.
+    """
+
+    def __init__(self, problem, dt):
+        import scipy.sparse as sp
+        import scipy.sparse.linalg as spla
+        self.problem = problem
+        self.dt = float(dt)
+        Nx, Ny = problem.Nx, problem.Ny
+        hx, hy = problem.hx, problem.hy
+        self.Nx, self.Ny, self.hx, self.hy = Nx, Ny, hx, hy
+        solid = problem.solid if problem.solid is not None \
+            else np.zeros((Nx, Ny), bool)
+        self.solid = solid
+        has_out = {s: problem.side(s).kind == "outflow"
+                   for s in ("left", "right", "bottom", "top")}
+        self.has_out = has_out
+
+        def lid(i, j):
+            return i + j * Nx
+
+        rows, cols, vals = [], [], []
+        for j in range(Ny):
+            for i in range(Nx):
+                c = lid(i, j)
+                if solid[i, j]:
+                    rows.append(c); cols.append(c); vals.append(1.0); continue
+                diag = 0.0
+                # vizinhos internos (fluido)
+                for (di, dj, d, ln) in ((1, 0, hx, hy), (-1, 0, hx, hy),
+                                        (0, 1, hy, hx), (0, -1, hy, hx)):
+                    ii, jj = i + di, j + dj
+                    if 0 <= ii < Nx and 0 <= jj < Ny and not solid[ii, jj]:
+                        w = dt * ln / d
+                        rows.append(c); cols.append(lid(ii, jj))
+                        vals.append(w); diag -= w
+                # faces de SAÍDA (Dirichlet p=0): fantasma p=0 a meia célula
+                for (side, at_edge, d, ln) in (
+                        ("left", i == 0, hx, hy), ("right", i == Nx - 1, hx, hy),
+                        ("bottom", j == 0, hy, hx), ("top", j == Ny - 1, hy, hx)):
+                    if at_edge and has_out[side]:
+                        diag -= dt * ln / (0.5 * d)     # p_ghost=0 (Dirichlet)
+                rows.append(c); cols.append(c); vals.append(diag)
+        A = sp.csr_matrix((vals, (rows, cols)), shape=(Nx * Ny, Nx * Ny)).tolil()
+        self._pure_neumann = not any(has_out.values())
+        if self._pure_neumann:
+            pin = int(np.argmin(solid.flatten(order="F")))
+            A[pin, :] = 0.0; A[pin, pin] = 1.0
+            self._pin = pin
+        self.lu = spla.splu(A.tocsc())
+
+    def solve(self, w1, w2):
+        dt, hx, hy = self.dt, self.hx, self.hy
+        Nx, Ny, solid = self.Nx, self.Ny, self.solid
+        divw = mac_divergence(w1, w2, hx, hy)
+        divw = divw.copy(); divw[solid] = 0.0
+        b = (divw * hx * hy).flatten(order="F")
+        b[solid.flatten(order="F")] = 0.0
+        if self._pure_neumann:
+            fluid = ~solid.flatten(order="F")
+            b[fluid] -= b[fluid].sum() / fluid.sum()
+            b[self._pin] = 0.0
+        p = self.lu.solve(b).reshape((Nx, Ny), order="F")
+        p[solid] = 0.0
+        u = w1.copy(); v = w2.copy()
+        u[1:-1, :] -= dt * (p[1:, :] - p[:-1, :]) / hx
+        v[:, 1:-1] -= dt * (p[:, 1:] - p[:, :-1]) / hy
+        # saída: gradiente de p do lado da célula de borda; entrada/parede v·n
+        _apply_external_normals_after_step(u, v, self.problem)
+        fx, fy = solid_faces(solid)
+        u[fx] = 0.0; v[fy] = 0.0
+        return u, v, p
+
+    def step(self, w1, w2):
+        u, v, _ = self.solve(w1, w2)
+        return u, v
+
+
+def _diagnostic_pressure(u, v, problem, dt):
+    """Pressão física do instante: projeta a velocidade atual (já ~solenoidal)
+    num Poisson mascarado e devolve p (= potencial/δt·δt ... aqui p tal que
+    δt∇²p=∇·w*). Usa ChannelFinePoisson sobre (u,v) como w*."""
+    fp = ChannelFinePoisson(problem, dt)
+    _, _, p = fp.solve(u, v)
+    return p
+
+
+def obstacle_forces(u, v, p, problem, U_ref, D):
+    """C_D, C_L por balanço de momento num volume de controle retangular que
+    envolve o obstáculo (uma célula de folga). Fluxo convectivo + pressão +
+    viscoso nas 4 faces do VC. ρ=1; C = 2F/(ρ U² D)."""
+    solid = problem.solid
+    if solid is None or not solid.any():
+        return 0.0, 0.0
+    hx, hy, nu = problem.hx, problem.hy, problem.nu
+    Nx, Ny = problem.Nx, problem.Ny
+    xs = np.where(solid.any(axis=1))[0]; ys = np.where(solid.any(axis=0))[0]
+    i0, i1 = max(xs.min() - 1, 0), min(xs.max() + 1, Nx - 1)   # células do VC
+    j0, j1 = max(ys.min() - 1, 0), min(ys.max() + 1, Ny - 1)
+
+    # velocidade no centro das células
+    uc = 0.5 * (u[:-1, :] + u[1:, :])
+    vc = 0.5 * (v[:, :-1] + v[:, 1:])
+
+    Fx = 0.0; Fy = 0.0
+    # faces verticais (esquerda i0, direita i1) — normal ±x
+    for i, s in ((i0, -1.0), (i1 + 1, +1.0)):     # i = face index (u-face)
+        ii = min(max(i, 0), Nx)
+        un = u[ii, j0:j1 + 1]                      # u·n (x) na face
+        uc_f = un
+        vc_f = 0.5 * (vc[min(ii, Nx - 1), j0:j1 + 1] + vc[max(ii - 1, 0), j0:j1 + 1])
+        pf = 0.5 * (p[min(ii, Nx - 1), j0:j1 + 1] + p[max(ii - 1, 0), j0:j1 + 1])
+        # dp/dt absorvido no p; força no corpo = -(fluxo conv + pressão - visc)
+        Fx += -s * np.sum((uc_f * un + pf) * hy)
+        Fy += -s * np.sum((vc_f * un) * hy)
+    # faces horizontais (baixo j0, cima j1) — normal ±y
+    for j, s in ((j0, -1.0), (j1 + 1, +1.0)):
+        jj = min(max(j, 0), Ny)
+        vn = v[i0:i1 + 1, jj]
+        vc_f = vn
+        uc_f = 0.5 * (uc[i0:i1 + 1, min(jj, Ny - 1)] + uc[i0:i1 + 1, max(jj - 1, 0)])
+        pf = 0.5 * (p[i0:i1 + 1, min(jj, Ny - 1)] + p[i0:i1 + 1, max(jj - 1, 0)])
+        Fx += -s * np.sum((uc_f * vn) * hx)
+        Fy += -s * np.sum((vc_f * vn + pf) * hx)
+
+    q = 0.5 * U_ref * U_ref * D                    # pressão dinâmica * D (ρ=1)
+    return Fx / q, Fy / q
+
+
+def strouhal(signal, dt, U_ref, D, t_skip_frac=0.5):
+    """St = f·D/U da frequência dominante do sinal (após descartar a fração
+    inicial de transiente)."""
+    sig = np.asarray(signal, float)
+    n0 = int(len(sig) * t_skip_frac)
+    s = sig[n0:]
+    s = s - s.mean()
+    if s.size < 8:
+        return float("nan")
+    freqs = np.fft.rfftfreq(s.size, d=dt)
+    amp = np.abs(np.fft.rfft(s * np.hanning(s.size)))
+    amp[0] = 0.0
+    f_dom = freqs[int(np.argmax(amp))]
+    return float(f_dom * D / U_ref)
+
+
 def make_frame_saver(output_dir="frames_mprm", dpi=100, Re=100.0, title_prefix="MPrM"):
     """Factory: retorna um callback que salva frames PNG da cavidade.
 
