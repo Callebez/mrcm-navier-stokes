@@ -4,6 +4,7 @@ make_frame_saver, make_gif: salva frames PNG e gera GIF animado.
 """
 from __future__ import annotations
 import os, glob
+import numpy as np
 
 def make_frame_saver(output_dir="frames_mprm", dpi=100, Re=100.0, title_prefix="MPrM"):
     """Factory: retorna um callback que salva frames PNG da cavidade.
@@ -75,6 +76,19 @@ def make_gif(frame_dir="frames_mprm", output="cavity_mprm.gif",
     try:
         import imageio.v2 as imageio
         frames = [imageio.imread(f) for f in files]
+        # Garante que todos os frames têm o mesmo shape (colorbar pode variar)
+        if len(frames) > 1:
+            shapes = {f.shape for f in frames}
+            if len(shapes) > 1:
+                from PIL import Image
+                target_shape = frames[0].shape
+                resized = []
+                for f in frames:
+                    if f.shape != target_shape:
+                        f = np.array(Image.fromarray(f).resize(
+                            (target_shape[1], target_shape[0])))
+                    resized.append(f)
+                frames = resized
         imageio.mimsave(output, frames, duration=duration, loop=0)
         print(f"✓ GIF salvo: {output} ({len(frames)} frames)")
         return output
