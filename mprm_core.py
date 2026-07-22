@@ -420,8 +420,8 @@ class MPrMProjector:
     `comm` (isub % size), como no executor mpi do mrcm.
     """
 
-    def __init__(self, cfg: MRCMConfig, dt: float, problem=None,
-                 comm=None, verbose=False, eps_solid=1e-6):
+    def __init__(self, cfg: MRCMConfig, dt: float, comm=None,
+                 problem=None, verbose=False, eps_solid=1e-6):
         from firedrake import (Constant, FunctionSpace, TestFunction,
                                TestFunctions, Function, FacetNormal,
                                VectorFunctionSpace, SpatialCoordinate,
@@ -845,24 +845,38 @@ class MACDownscaler:
 # Passo completo do MPrM e laços temporais
 # ===========================================================================
 
-def mprm_projection_step(w1, w2, projector: MPrMProjector,
-                         downscaler: MACDownscaler):
-    """Passos 2-4 do MPrM: projeção MRCM + downscaling + uⁿ⁺¹ = w* − ṽ.
+def _apply_external_normals_after_step(u, v, problem):
+    """Após uⁿ⁺¹=w*−ṽ: paredes/slip impõem u·n=0; entrada e saída preservam
+    o que veio de w*−ṽ (entrada: ṽ·n=0 ⇒ u·n=perfil; saída: corrigido)."""
+    S = problem.sides
+    if S["left"].kind in ("wall", "slip"):
+        u[0, :] = 0.0
+    if S["right"].kind in ("wall", "slip"):
+        u[-1, :] = 0.0
+    if S["bottom"].kind in ("wall", "slip"):
+        v[:, 0] = 0.0
+    if S["top"].kind in ("wall", "slip"):
+        v[:, -1] = 0.0
 
-    Recebe w* na malha MAC global; devolve (u, v) com ∇·u = 0 célula a
-    célula (até o defeito de compatibilidade reportado pelo downscaler).
-    Coletivo sobre projector.comm (todos os ranks retornam o campo global).
-    """
+
+def mprm_projection_step(w1, w2, projector: "MPrMProjector",
+                         downscaler: "MACDownscaler"):
+    """Passos 2-4 do MPrM. Lê `projector.problem` (obstáculo + saída).
+    Assinatura inalterada — retrocompatível."""
     cfg = projector.cfg
     comm = projector.comm
+    problem = projector.problem
     n, m = cfg.nlocx, cfg.nlocy
     hx, hy = downscaler.hx, downscaler.hy
+    solid = problem.solid
 
     divw = mac_divergence(w1, w2, hx, hy)
+    if solid is not None:
+        divw = divw.copy(); divw[solid] = 0.0
     fluxes = projector.project(divw)
+    out_fluxes = getattr(projector, "last_boundary_fluxes", {})
 
-    u = w1.copy()
-    v = w2.copy()
+    u = w1.copy(); v = w2.copy()
     zeros_m, zeros_n = np.zeros(m), np.zeros(n)
     my_patch = {}
     for isub in projector.my_subs:
@@ -872,8 +886,21 @@ def mprm_projection_step(w1, w2, projector: MPrMProjector,
         fE = fluxes.get(("v", ix + 1, iy), zeros_m)
         fS = fluxes.get(("h", ix, iy), zeros_n)
         fN = fluxes.get(("h", ix, iy + 1), zeros_n)
+        # fluxos externos de SAÍDA (v·n reconstruído nas faces outflow)
+        if (isub, "right") in out_fluxes:
+            fE = out_fluxes[(isub, "right")]
+        if (isub, "left") in out_fluxes:
+            fW = out_fluxes[(isub, "left")]
+        if (isub, "top") in out_fluxes:
+            fN = out_fluxes[(isub, "top")]
+        if (isub, "bottom") in out_fluxes:
+            fS = out_fluxes[(isub, "bottom")]
+        solid_loc = None
+        if solid is not None:
+            sl = solid[ox:ox + n, oy:oy + m]
+            solid_loc = sl if sl.any() else None
         vt1, vt2 = downscaler.solve_patch(
-            divw[ox:ox + n, oy:oy + m], fW, fE, fS, fN)
+            divw[ox:ox + n, oy:oy + m], fW, fE, fS, fN, solid_loc=solid_loc)
         my_patch[isub] = (vt1, vt2)
 
     for d in comm.allgather(my_patch):
@@ -882,10 +909,12 @@ def mprm_projection_step(w1, w2, projector: MPrMProjector,
             ox, oy = ix * n, iy * m
             u[ox:ox + n + 1, oy:oy + m] = w1[ox:ox + n + 1, oy:oy + m] - vt1
             v[ox:ox + n, oy:oy + m + 1] = w2[ox:ox + n, oy:oy + m + 1] - vt2
-    # paredes impermeáveis (interfaces internas foram escritas 2×, com o
-    # MESMO valor médio — consistência garantida pela Eq. 21)
-    u[0, :] = u[-1, :] = 0.0
-    v[:, 0] = v[:, -1] = 0.0
+
+    # contorno externo por lado (impermeável => 0; saída/entrada preservam w*)
+    _apply_external_normals_after_step(u, v, problem)
+    if solid is not None:
+        fx, fy = solid_faces(solid)
+        u[fx] = 0.0; v[fy] = 0.0
     return u, v
 
 
@@ -937,78 +966,151 @@ class FineProjector:
         return u, v
 
 
-def run_cavity(Re=100.0, Ndom=3, nloc=16, T=8.0, dt=None, lid_velocity=1.0,
-               degreeU=1, degreeP=1, alpha=1.0, method="mprm",
-               basis_kind="nodal_Q",
-               comm=None, verbose=True, log_every=200,
-               frame_callback=None, frame_every=0):
-    """Cavidade com tampa deslizante (artigo §3.3) integrada até t=T.
+def _seed_inflow(u, w1_0, problem):
+    """Semeia a face de entrada no campo inicial (evita transiente de partida
+    com entrada nula)."""
+    if problem.side("left").kind == "inflow":
+        u = u.copy(); u[0, :] = w1_0[0, :]
+    return u
 
-    method: "mprm" (projeção MRCM + downscaling) ou "fine" (referência de
-    malha fina, sem decomposição). Malha global N = Ndom*nloc por direção.
 
-    Parâmetros de animação:
-      frame_callback: callable(step, t, u, v, hx, hy) chamado a cada
-                      `frame_every` passos no rank 0. Use para salvar frames.
-      frame_every:    intervalo (em passos) entre chamadas do callback.
-                      0 = desabilitado.
-    Retorna dict(u, v, dt, nsteps, t_wall, divmax, defect).
-    """
+def _sample_probe(u, v, problem, px, py):
+    """v-velocidade interpolada no ponto (px,py) — sonda de esteira p/ Strouhal."""
+    hx, hy = problem.hx, problem.hy
+    j = min(int(py / hy), problem.Ny - 1)
+    i = min(int(px / hx), problem.Nx - 1)
+    return 0.5 * (v[i, j] + v[i, j + 1])
+
+
+def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
+             degreeU=1, degreeP=1, alpha=1.0, basis_kind="legendre_P",
+             eps_solid=1e-6, comm=None, verbose=True, log_every=200,
+             frame_callback=None, frame_every=0, probes=None,
+             obstacle_metrics=False, U_ref=1.0, D=1.0):
+    """Laço temporal genérico do MPrM para um FlowProblem. Cavidade e von
+    Kármán compartilham este caminho. Devolve dict(u,v,dt,nsteps,divmax,
+    defect,t_wall[,cl_history,probe_history])."""
     import time
     if comm is None:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
 
-    N = Ndom * nloc
-    hx = hy = 1.0 / N
-    nu = lid_velocity / Re
+    Nx, Ny = problem.Nx, problem.Ny
+    hx, hy = problem.hx, problem.hy
     if dt is None:
-        dt = 0.4 * min(hx / lid_velocity, hx * hx / (4.0 * nu))
+        umax = max(U_ref, 1e-12)
+        nu = max(problem.nu, 1e-12)
+        dt = 0.4 * min(hx / umax, hx * hx / (4.0 * nu))
     nsteps = int(np.ceil(T / dt))
 
     if method == "mprm":
-        # NOTA (D3/π₀): com graus assimétricos (degreeP < degreeU) use uma
-        # família hierárquica ("legendre_P"/"monomial_P") — o nodal_Q trunca
-        # a base de Lagrange do grau máximo e P_H perde a constante π₀,
-        # quebrando o balanço de massa da média de fluxos (defeito ~1e-3).
         cfg = MRCMConfig(Ndomx=Ndom, Ndomy=Ndom, nlocx=nloc, nlocy=nloc,
                          degreeU=degreeU, degreeP=degreeP, alpha=alpha,
-                         basis_kind=basis_kind,
+                         basis_kind=basis_kind, Lx=problem.Lx, Ly=problem.Ly,
                          mixed_family="BDM", mixed_order=0,
                          executor_kind="sequential")
-        projector = MPrMProjector(cfg, dt, comm=comm)
+        projector = MPrMProjector(cfg, dt, comm=comm,
+                                  problem=problem, eps_solid=eps_solid)
         downscaler = MACDownscaler(cfg, dt)
     else:
-        fine = FineProjector(N, N, hx, hy, dt)
+        fine = ChannelFinePoisson(problem, dt)
+        projector = None
 
-    u = np.zeros((N + 1, N))
-    v = np.zeros((N, N + 1))
+    u = np.zeros((Nx + 1, Ny)); v = np.zeros((Nx, Ny + 1))
+    # inicializa a entrada em w* (campo inicial = perfil de entrada nas faces)
+    w1_0, w2_0 = mac_transport(u, v, problem, dt)
+    u = _seed_inflow(u, w1_0, problem)
+
+    cl_hist = []
+    probe_hist = [] if probes else None
     t0 = time.perf_counter()
     for step in range(nsteps):
-        w1, w2 = mac_wstar(u, v, hx, hy, dt, nu, lid_velocity)
+        w1, w2 = mac_transport(u, v, problem, dt)
         if method == "mprm":
             u, v = mprm_projection_step(w1, w2, projector, downscaler)
         else:
             u, v = fine.step(w1, w2)
 
-        # --- callback de frame ---
+        if comm.rank == 0:
+            if obstacle_metrics and problem.solid is not None:
+                p = _diagnostic_pressure(u, v, problem, dt)
+                cd, cl = obstacle_forces(u, v, p, problem, U_ref, D)
+                cl_hist.append((dt * (step + 1), cd, cl))
+            if probes:
+                probe_hist.append(
+                    [dt * (step + 1)] + [_sample_probe(u, v, problem, px, py)
+                                         for (px, py) in probes])
         if frame_every > 0 and frame_callback is not None and comm.rank == 0:
             if step == 0 or (step + 1) % frame_every == 0:
                 frame_callback(step, dt * (step + 1), u, v, hx, hy)
-
         if verbose and comm.rank == 0 and (step + 1) % log_every == 0:
-            dv = np.abs(mac_divergence(u, v, hx, hy)).max()
+            dv = np.abs(mac_divergence(u, v, hx, hy))
+            dv = dv[~problem.solid].max() if problem.solid is not None else dv.max()
             print(f"  passo {step+1}/{nsteps}  t={dt*(step+1):.3f}  "
                   f"max|div u| = {dv:.2e}", flush=True)
     t_wall = time.perf_counter() - t0
 
-    return {
-        "u": u, "v": v, "dt": dt, "nsteps": nsteps, "N": N,
-        "t_wall": t_wall,
-        "divmax": float(np.abs(mac_divergence(u, v, hx, hy)).max()),
-        "defect": (projector and downscaler.last_defect) if method == "mprm"
-                  else 0.0,
-    }
+    dvall = np.abs(mac_divergence(u, v, hx, hy))
+    divmax = float(dvall[~problem.solid].max() if problem.solid is not None
+                   else dvall.max())
+    out = {"u": u, "v": v, "dt": dt, "nsteps": nsteps, "N": Nx,
+           "t_wall": t_wall, "divmax": divmax,
+           "defect": (downscaler.last_defect if method == "mprm" else 0.0)}
+    if cl_hist:
+        out["cl_history"] = np.array(cl_hist)     # colunas: t, Cd, Cl
+    if probe_hist is not None:
+        out["probe_history"] = np.array(probe_hist)
+    return out
+
+
+def run_cavity(Re=100.0, Ndom=3, nloc=16, T=8.0, dt=None, lid_velocity=1.0,
+               degreeU=1, degreeP=1, alpha=1.0, method="mprm",
+               basis_kind="nodal_Q",
+               comm=None, verbose=True, log_every=200,
+               frame_callback=None, frame_every=0):
+    """Cavidade com tampa deslizante (wrapper sobre run_flow). Assinatura e
+    retorno preservados para compatibilidade com testes/notebook."""
+    N = Ndom * nloc
+    problem = cavity_problem(N, Re, lid_velocity=lid_velocity)
+    if dt is None:
+        hx = 1.0 / N
+        dt = 0.4 * min(hx / lid_velocity, hx * hx / (4.0 * (lid_velocity / Re)))
+    return run_flow(problem, Ndom, nloc, T, dt=dt, method=method,
+                    degreeU=degreeU, degreeP=degreeP, alpha=alpha,
+                    basis_kind=basis_kind, comm=comm, verbose=verbose,
+                    log_every=log_every, frame_callback=frame_callback,
+                    frame_every=frame_every, U_ref=lid_velocity)
+
+
+def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
+                   Ndom=None, nloc=None, degreeU=1, degreeP=3, alpha=1.0,
+                   basis_kind="legendre_P", T=None, dt=None, method="mprm",
+                   inflow="uniform", walls="wall", eps_solid=1e-6,
+                   comm=None, verbose=True, log_every=200,
+                   probes=None, frame_callback=None, frame_every=0):
+    """Escoamento em torno de um cilindro quadrado (von Kármán, artigo §3.5).
+
+    Malha global Nx=Ndom_x*nloc, Ny=Ndom_y*nloc — aqui usamos Ndom (por
+    direção) e nloc iguais; ajuste `nloc`/`Ndom` para caber o domínio
+    retangular (Nx/Ny ≈ Lx/Ly). Espaços default (degreeU=1,degreeP=3)
+    seguem a recomendação do artigo p/ escoamento transiente (pressão rica).
+    Devolve o dict de run_flow + cl_history (t,Cd,Cl) e probe_history.
+    """
+    assert Ndom is not None and nloc is not None, "Ndom e nloc obrigatórios"
+    Nx = Ny = Ndom * nloc
+    # ajusta a razão de células ao domínio (mantém subdomínios quadrados em H)
+    problem = von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
+                                 inflow=inflow, walls=walls)
+    if T is None:
+        T = 40.0 * D / U_in
+    if probes is None:
+        probes = [(xc + 3.0 * D, yc)]      # sonda de esteira default
+    return run_flow(problem, Ndom, nloc, T, dt=dt, method=method,
+                    degreeU=degreeU, degreeP=degreeP, alpha=alpha,
+                    basis_kind=basis_kind, eps_solid=eps_solid, comm=comm,
+                    verbose=verbose, log_every=log_every, probes=probes,
+                    obstacle_metrics=True, U_ref=U_in, D=D,
+                    frame_callback=frame_callback, frame_every=frame_every)
 
 
 def make_frame_saver(output_dir="frames_mprm", dpi=100, Re=100.0, title_prefix="MPrM"):
