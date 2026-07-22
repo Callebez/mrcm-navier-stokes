@@ -165,11 +165,14 @@ def cavity_problem(N, Re, lid_velocity=1.0) -> FlowProblem:
 
 
 def von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
-                       inflow="uniform", walls="wall",
+                       inflow="parabolic", walls="slip",
+                       inflow_norm="max",
                        outflow="pressure") -> FlowProblem:
     """Escoamento em torno de um cilindro quadrado (von Kármán). Re = U_in*D/nu.
 
-    inflow: "uniform" (u=U_in) ou "parabolic" (perfil de canal, média U_in).
+    inflow: "uniform" (u=U_in constante) ou "parabolic" (perfil de canal).
+    inflow_norm: "max" (pico = U_in, conforme artigo Lages §3.5) ou "mean"
+                 (média = U_in, comportamento anterior).
     walls:  "wall" (no-slip) ou "slip" (free-slip) para top/bottom.
     outflow: "pressure" (Dirichlet p=0). Demais valores reservados p/ extensão.
     """
@@ -180,8 +183,13 @@ def von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
         profile = float(U_in)
     elif inflow == "parabolic":
         Ly_c = float(Ly)
-        def profile(y):                       # média = U_in
-            return 6.0 * U_in * y * (Ly_c - y) / (Ly_c ** 2)
+        if inflow_norm == "max":
+            # pico = U_in (‖u_∞‖ = U_in, como no artigo)
+            def profile(y):
+                return 4.0 * U_in * y * (Ly_c - y) / (Ly_c ** 2)
+        else:  # "mean" — média = U_in (comportamento anterior)
+            def profile(y):
+                return 6.0 * U_in * y * (Ly_c - y) / (Ly_c ** 2)
     else:
         raise ValueError(f"inflow inválido: {inflow!r}")
     sides = {
@@ -1031,6 +1039,7 @@ def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
         diag_solver = DiagnosticPressureSolver(problem)
 
     t0 = time.perf_counter()
+    u_prev, v_prev = u.copy(), v.copy()  # para termo transiente nas forças
     for step in range(nsteps):
         w1, w2 = mac_transport(u, v, problem, dt)
         if method == "mprm":
@@ -1041,7 +1050,8 @@ def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
         if comm.rank == 0:
             if obstacle_metrics and problem.solid is not None and step % obstacle_metrics_every == 0:
                 p = diag_solver.solve(u, v)
-                cd, cl = obstacle_forces(u, v, p, problem, U_ref, D)
+                cd, cl = obstacle_forces(u, v, p, problem, U_ref, D,
+                                         u_prev=u_prev, v_prev=v_prev, dt=dt)
                 cl_hist.append((dt * (step + 1), cd, cl))
             if probes:
                 probe_hist.append(
@@ -1055,6 +1065,7 @@ def run_flow(problem, Ndom, nloc, T, dt=None, method="mprm",
             dv = dv[~problem.solid].max() if problem.solid is not None else dv.max()
             print(f"  passo {step+1}/{nsteps}  t={dt*(step+1):.3f}  "
                   f"max|div u| = {dv:.2e}", flush=True)
+        u_prev, v_prev = u.copy(), v.copy()
     t_wall = time.perf_counter() - t0
 
     dvall = np.abs(mac_divergence(u, v, hx, hy))
@@ -1092,7 +1103,8 @@ def run_cavity(Re=100.0, Ndom=3, nloc=16, T=8.0, dt=None, lid_velocity=1.0,
 def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
                    Ndom=None, nloc=None, degreeU=1, degreeP=3, alpha=1.0,
                    basis_kind="legendre_P", T=None, dt=None, method="mprm",
-                   inflow="uniform", walls="wall", eps_solid=1e-6,
+                   inflow="parabolic", walls="slip", inflow_norm="max",
+                   eps_solid=1e-6,
                    comm=None, verbose=True, log_every=200,
                    probes=None, frame_callback=None, frame_every=0,
                    obstacle_metrics_every=1):
@@ -1108,7 +1120,8 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
     Nx = Ny = Ndom * nloc
     # ajusta a razão de células ao domínio (mantém subdomínios quadrados em H)
     problem = von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
-                                 inflow=inflow, walls=walls)
+                                 inflow=inflow, walls=walls,
+                                 inflow_norm=inflow_norm)
     if T is None:
         T = 40.0 * D / U_in
     if probes is None:
@@ -1328,61 +1341,101 @@ def _diagnostic_pressure(u, v, problem, dt):
     return solver.solve(u, v)
 
 
-def obstacle_forces(u, v, p, problem, U_ref, D):
+def obstacle_forces(u, v, p, problem, U_ref, D, u_prev=None, v_prev=None, dt=None):
     """C_D, C_L por balanço de momento num volume de controle retangular que
-    envolve o obstáculo (uma célula de folga). Fluxo convectivo + pressão +
-    viscoso nas 4 faces do VC. ρ=1; C = 2F/(ρ U² D)."""
+    envolve o obstáculo (uma célula de folga). Inclui fluxo convectivo +
+    pressão + VISCOSO (σ = -pI + ν(∇u+∇uᵀ)) nas 4 faces do VC e, se
+    u_prev/dt fornecidos, o termo transiente d/dt ∫_VC u dV.
+    ρ=1; C = 2F/(ρ U² D)."""
     solid = problem.solid
     if solid is None or not solid.any():
         return 0.0, 0.0
     hx, hy, nu = problem.hx, problem.hy, problem.nu
     Nx, Ny = problem.Nx, problem.Ny
     xs = np.where(solid.any(axis=1))[0]; ys = np.where(solid.any(axis=0))[0]
-    i0, i1 = max(xs.min() - 1, 0), min(xs.max() + 1, Nx - 1)   # células do VC
+    i0, i1 = max(xs.min() - 1, 0), min(xs.max() + 1, Nx - 1)
     j0, j1 = max(ys.min() - 1, 0), min(ys.max() + 1, Ny - 1)
 
-    # velocidade no centro das células
     uc = 0.5 * (u[:-1, :] + u[1:, :])
     vc = 0.5 * (v[:, :-1] + v[:, 1:])
+    # gradientes centrados nos centros das células
+    dudx = np.zeros((Nx, Ny)); dudy = np.zeros((Nx, Ny))
+    dvdx = np.zeros((Nx, Ny)); dvdy = np.zeros((Nx, Ny))
+    dudx[1:-1, :] = (uc[2:, :] - uc[:-2, :]) / (2 * hx)
+    dudx[0, :] = (uc[1, :] - uc[0, :]) / hx
+    dudx[-1, :] = (uc[-1, :] - uc[-2, :]) / hx
+    dudy[:, 1:-1] = (uc[:, 2:] - uc[:, :-2]) / (2 * hy)
+    dudy[:, 0] = (uc[:, 1] - uc[:, 0]) / hy
+    dudy[:, -1] = (uc[:, -1] - uc[:, -2]) / hy
+    dvdx[1:-1, :] = (vc[2:, :] - vc[:-2, :]) / (2 * hx)
+    dvdx[0, :] = (vc[1, :] - vc[0, :]) / hx
+    dvdx[-1, :] = (vc[-1, :] - vc[-2, :]) / hx
+    dvdy[:, 1:-1] = (vc[:, 2:] - vc[:, :-2]) / (2 * hy)
+    dvdy[:, 0] = (vc[:, 1] - vc[:, 0]) / hy
+    dvdy[:, -1] = (vc[:, -1] - vc[:, -2]) / hy
 
     Fx = 0.0; Fy = 0.0
-    # faces verticais (esquerda i0, direita i1) — normal ±x
-    for i, s in ((i0, -1.0), (i1 + 1, +1.0)):     # i = face index (u-face)
+    # faces verticais — normal ±x
+    for i, s in ((i0, -1.0), (i1 + 1, +1.0)):
         ii = min(max(i, 0), Nx)
-        un = u[ii, j0:j1 + 1]                      # u·n (x) na face
-        uc_f = un
-        vc_f = 0.5 * (vc[min(ii, Nx - 1), j0:j1 + 1] + vc[max(ii - 1, 0), j0:j1 + 1])
-        pf = 0.5 * (p[min(ii, Nx - 1), j0:j1 + 1] + p[max(ii - 1, 0), j0:j1 + 1])
-        # dp/dt absorvido no p; força no corpo = -(fluxo conv + pressão - visc)
-        Fx += -s * np.sum((uc_f * un + pf) * hy)
-        Fy += -s * np.sum((vc_f * un) * hy)
-    # faces horizontais (baixo j0, cima j1) — normal ±y
+        ic = min(max(i - (s > 0), 0), Nx - 1)
+        un = u[ii, j0:j1 + 1]
+        vc_f = 0.5 * (vc[min(ii, Nx-1), j0:j1+1] + vc[max(ii-1, 0), j0:j1+1])
+        pf   = 0.5 * (p[min(ii, Nx-1), j0:j1+1] + p[max(ii-1, 0), j0:j1+1])
+        visc_xx = 2.0 * nu * dudx[ic, j0:j1+1]
+        visc_yx = nu * (dvdx[ic, j0:j1+1] + dudy[ic, j0:j1+1])
+        Fx += -s * np.sum((un * un + pf - visc_xx) * hy)
+        Fy += -s * np.sum((vc_f * un        - visc_yx) * hy)
+    # faces horizontais — normal ±y
     for j, s in ((j0, -1.0), (j1 + 1, +1.0)):
         jj = min(max(j, 0), Ny)
+        jc = min(max(j - (s > 0), 0), Ny - 1)
         vn = v[i0:i1 + 1, jj]
-        vc_f = vn
-        uc_f = 0.5 * (uc[i0:i1 + 1, min(jj, Ny - 1)] + uc[i0:i1 + 1, max(jj - 1, 0)])
-        pf = 0.5 * (p[i0:i1 + 1, min(jj, Ny - 1)] + p[i0:i1 + 1, max(jj - 1, 0)])
-        Fx += -s * np.sum((uc_f * vn) * hx)
-        Fy += -s * np.sum((vc_f * vn + pf) * hx)
+        uc_f = 0.5 * (uc[i0:i1+1, min(jj, Ny-1)] + uc[i0:i1+1, max(jj-1, 0)])
+        pf   = 0.5 * (p[i0:i1+1, min(jj, Ny-1)] + p[i0:i1+1, max(jj-1, 0)])
+        visc_xy = nu * (dudy[i0:i1+1, jc] + dvdx[i0:i1+1, jc])
+        visc_yy = 2.0 * nu * dvdy[i0:i1+1, jc]
+        Fx += -s * np.sum((uc_f * vn        - visc_xy) * hx)
+        Fy += -s * np.sum((vn * vn + pf     - visc_yy) * hx)
 
-    q = 0.5 * U_ref * U_ref * D                    # pressão dinâmica * D (ρ=1)
+    # termo transiente: d/dt ∫_VC u dV
+    if u_prev is not None and dt is not None:
+        upc = 0.5 * (u_prev[:-1, :] + u_prev[1:, :])
+        vpc = 0.5 * (v_prev[:, :-1] + v_prev[:, 1:])
+        dVol = hx * hy
+        Fx -= (uc[i0:i1+1, j0:j1+1].sum() - upc[i0:i1+1, j0:j1+1].sum()) * dVol / dt
+        Fy -= (vc[i0:i1+1, j0:j1+1].sum() - vpc[i0:i1+1, j0:j1+1].sum()) * dVol / dt
+
+    q = 0.5 * U_ref * U_ref * D
     return Fx / q, Fy / q
 
 
-def strouhal(signal, dt, U_ref, D, t_skip_frac=0.5):
-    """St = f·D/U da frequência dominante do sinal (após descartar a fração
-    inicial de transiente)."""
+def strouhal(signal, dt, U_ref, D, t_skip_frac=0.5, pad=8):
+    """St = f·D/U da frequência dominante do sinal.
+
+    Zero-padding (pad=8) refina os bins da FFT para resolução sub-bin.
+    Interpolação parabólica de 3 pontos no pico para precisão adicional.
+    Descartam-se os primeiros t_skip_frac do sinal (transiente).
+    """
     sig = np.asarray(signal, float)
     n0 = int(len(sig) * t_skip_frac)
     s = sig[n0:]
     s = s - s.mean()
-    if s.size < 8:
+    if s.size < 16:
         return float("nan")
-    freqs = np.fft.rfftfreq(s.size, d=dt)
-    amp = np.abs(np.fft.rfft(s * np.hanning(s.size)))
+    s = s * np.hanning(s.size)
+    n = int(2 ** np.ceil(np.log2(s.size * pad)))        # zero-padding
+    amp = np.abs(np.fft.rfft(s, n=n))
     amp[0] = 0.0
-    f_dom = freqs[int(np.argmax(amp))]
+    freqs = np.fft.rfftfreq(n, d=dt)
+    k = int(np.argmax(amp))
+    # Interpolação parabólica de 3 pontos para refinar o pico
+    if 0 < k < len(amp) - 1:
+        a, b, c = amp[k - 1], amp[k], amp[k + 1]
+        denom = a - 2 * b + c
+        if abs(denom) > 1e-30:
+            k = k + 0.5 * (a - c) / denom
+    f_dom = k * (freqs[1] - freqs[0]) if k > 0 else freqs[1]
     return float(f_dom * D / U_ref)
 
 

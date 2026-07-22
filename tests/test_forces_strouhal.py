@@ -18,7 +18,8 @@ def test_strouhal_recupera_frequencia_conhecida():
 
 def test_channel_fine_poisson_projeta_divergencia_zero():
     prob = von_karman_problem(Lx=8.0, Ly=4.0, Nx=32, Ny=16, D=1.0,
-                              xc=2.0, yc=2.0, U_in=1.0, Re=100.0)
+                              xc=2.0, yc=2.0, U_in=1.0, Re=100.0,
+                              inflow="uniform", walls="wall")
     fp = ChannelFinePoisson(prob, dt=0.05)
     rng = np.random.default_rng(1)
     w1 = rng.standard_normal((33, 16)); w2 = rng.standard_normal((32, 17))
@@ -48,7 +49,8 @@ def test_channel_fine_poisson_projeta_divergencia_zero():
 
 def test_obstacle_forces_campo_uniforme_forca_nula():
     prob = von_karman_problem(Lx=8.0, Ly=4.0, Nx=32, Ny=16, D=1.0,
-                              xc=2.0, yc=2.0, U_in=1.0, Re=100.0)
+                              xc=2.0, yc=2.0, U_in=1.0, Re=100.0,
+                              inflow="uniform", walls="wall")
     # campo uniforme fora do sólido, pressão constante: forças ~ 0
     u = np.ones((33, 16)); v = np.zeros((32, 17)); p = np.zeros((32, 16))
     fx = np.zeros((33, 16), bool); fx[:-1, :] |= prob.solid; fx[1:, :] |= prob.solid

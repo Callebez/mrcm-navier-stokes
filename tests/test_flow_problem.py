@@ -43,7 +43,8 @@ def test_flowproblem_props():
 
 def test_von_karman_problem_estrutura():
     p = von_karman_problem(Lx=4.0, Ly=2.0, Nx=40, Ny=20, D=0.5,
-                           xc=1.0, yc=1.0, U_in=1.0, Re=100.0)
+                           xc=1.0, yc=1.0, U_in=1.0, Re=100.0,
+                           inflow="uniform", walls="wall")
     assert p.side("left").kind == "inflow"
     assert p.side("right").kind == "outflow"
     assert p.side("top").kind == "wall"

@@ -65,7 +65,8 @@ def test_wrapper_mac_wstar_igual_a_transport():
 
 def test_inflow_carrega_perfil_na_face_esquerda():
     prob = von_karman_problem(Lx=4.0, Ly=2.0, Nx=40, Ny=20, D=0.5,
-                              xc=1.0, yc=1.0, U_in=1.0, Re=100.0)
+                              xc=1.0, yc=1.0, U_in=1.0, Re=100.0,
+                              inflow="uniform", walls="wall")
     u = np.zeros((41, 20)); v = np.zeros((40, 21))
     w1, w2 = mac_transport(u, v, prob, dt=1e-3)
     # face de entrada (x=0) recebe U_in=1 (exceto onde há sólido — aqui não há)
@@ -74,7 +75,8 @@ def test_inflow_carrega_perfil_na_face_esquerda():
 
 def test_obstaculo_zera_faces_solidas():
     prob = von_karman_problem(Lx=4.0, Ly=2.0, Nx=40, Ny=20, D=0.5,
-                              xc=1.0, yc=1.0, U_in=1.0, Re=100.0)
+                              xc=1.0, yc=1.0, U_in=1.0, Re=100.0,
+                              inflow="uniform", walls="wall")
     rng = np.random.default_rng(2)
     u = rng.standard_normal((41, 20)); v = rng.standard_normal((40, 21))
     w1, w2 = mac_transport(u, v, prob, dt=1e-3)
