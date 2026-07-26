@@ -5,8 +5,8 @@
 - **Data:** 2026-07-26
 - **Commit antes:** `0f229ad` (`git rev-parse --short HEAD` antes de começar, na branch
   `feature/quadtree-mprm`)
-- **Commit depois:** ver `git log --oneline -1` logo após o commit do Passo 9
-  (registrado após o commit desta tarefa, mesmo padrão da Tarefa 1).
+- **Commit depois:** `a0c9851` (`git log --oneline -1` logo após o commit do
+  Passo 9).
 - **Arquivos criados:**
   - `tests/test_prefactorization.py`
   - `docs/superpowers/reports/02-prefatoracao.md` (este arquivo)
