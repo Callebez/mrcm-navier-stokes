@@ -109,9 +109,10 @@ explicitamente na §4.3.
 | D1 | Quadtree adapta **apenas a escala grossa H**; `h` é uniforme global | Transporte MAC, cálculo de forças e CFL ficam intactos; o esforço concentra-se na projeção, que é onde o MRCM age |
 | D2 | `nloc_i = H_i / h` por folha (não `nloc` fixo) | Consequência direta de D1: folha maior, mais células |
 | D3 | Refinamento **geométrico estático**, concentrado nas proximidades do obstáculo | `K = δt` é constante — não há contraste de permeabilidade para guiar; a árvore é construída uma vez e o offline roda uma vez |
-| D4 | Interfaces **não atravessam** o obstáculo | Preserva `assert_solid_interior_to_subdomains` e mantém o balanço de forças num único subdomínio |
+| D4 | Interfaces **não atravessam** o obstáculo | Preserva `assert_solid_interior_to_subdomains` e evita folhas parcial ou totalmente sólidas, que exigem tratamento próprio (§4.5). Não tem relação com o cálculo de forças: `obstacle_forces` opera sobre os arrays MAC globais e independe da decomposição |
 | D5 | Pré-fatoração de `A_Γ` **antes** do quadtree | Sem isso o tempo de parede do estudo mede remontagem, não decomposição |
-| D6 | Obstáculo **centrado** (`yc = Ly/2`), grade base com número ímpar de células em `y` | Corrige o desvio 🔴 do diagnóstico e alinha com Lages §3.5 e Breuer et al. |
+| D6 | Obstáculo **centrado** (`yc = Ly/2`) | Corrige o desvio 🔴 do diagnóstico e alinha com Lages §3.5 e Breuer et al. |
+| D7 | Duas famílias de alinhamento corpo↔árvore, comparadas no estudo: **(a) corpo interior a uma folha** (D4 estrito, grade base ímpar em `y`) e **(b) corpo = bloco 2×2 de folhas** (grade base par em `y`, refino alcançando a superfície) | O ganho de levar o refino até a parede é uma pergunta empírica, não uma premissa; e o custo de (b) — folhas 100 % sólidas, condicionamento de `A_Γ` — precisa ser medido, não assumido |
 
 ---
 
@@ -181,11 +182,15 @@ na presença de nó pendurado, sem qualquer operador de restrição/prolongaçã
 
 ### 4.3 Geometria: restrições e como são resolvidas
 
-O quadtree é diádico: toda fronteira de folha cai em múltiplo de `H_0/2^ℓ`. Daí:
+O quadtree é diádico: toda fronteira de folha cai em múltiplo de `H_0/2^ℓ`. Esta
+seção trata da **família (a)** de D7 (corpo interior a uma folha); a família (b)
+está na §4.3.1. Daí:
 
-1. **Obstáculo centrado exige grade base ímpar em `y`.** Se `N_by` é par,
-   `y = Ly/2` é fronteira em todo nível e nenhum subdomínio contém o corpo. Com
-   `N_by` ímpar, o corpo fica no centro da célula base central.
+1. **Na família (a), obstáculo centrado exige grade base ímpar em `y`.** Se
+   `N_by` é par, `y = Ly/2` é fronteira em todo nível e nenhum subdomínio contém
+   o corpo. Com `N_by` ímpar, o corpo fica no centro da célula base central. (Na
+   família (b) a paridade se inverte: é justamente por `N_by` ser par que o
+   centro do canal coincide com um vértice da grade.)
 2. **A folha do obstáculo não pode ser subdividida.** Estando o corpo no centro
    dessa célula, subdividi-la colocaria uma interface exatamente sobre ele.
    Logo `H_obs = H_0 = Ly/N_by`, e `H_0 > D` é obrigatório.
@@ -208,7 +213,7 @@ O quadtree é diádico: toda fronteira de folha cai em múltiplo de `H_0/2^ℓ`.
 restrições, devolve `(h, nloc_por_nível, Nx, Ny, xc, yc)` e falha com mensagem
 explícita quando são incompatíveis.
 
-**Configuração de referência** (satisfaz 1–5):
+**Configuração de referência da família (a)** (satisfaz 1–5):
 
 | Grandeza | Valor |
 |---|---|
@@ -221,6 +226,41 @@ explícita quando são incompatíveis.
 | `h` | `H_0/32 = D/12` |
 | malha global | `320 × 96` |
 | folhas base | `30` |
+
+### 4.3.1 Família (b): corpo como bloco 2×2 de folhas
+
+Na família (a) a superfície do corpo fica no **interior** de um subdomínio: não
+há aresta de Γ perto dela, e o refino só cresce a partir da folha do corpo. Para
+que o refino alcance a parede, a superfície precisa **coincidir com fronteiras de
+folha** — ou seja, o obstáculo tem de ser união exata de folhas.
+
+**Impossibilidade de "corpo = uma folha" com corpo centrado.** Se o obstáculo é
+exatamente uma folha de nível `ℓ ≥ 1`, então `D = H_ℓ` e seu centro está em
+`(k + ½)·H_ℓ`. Centrado no canal: `Ly/2 = (k + ½)·D`, logo `Ly/D = 2k+1` é
+**ímpar**. Mas a construção diádica dá `Ly = N_by · 2^ℓ · D`, **par** para
+`ℓ ≥ 1`. Com `Ly = 8D` e corpo centrado, essa configuração não existe.
+
+**A saída é `D = 2·H_ℓ`**: o centro do corpo cai num *vértice* da grade diádica,
+que é exatamente onde o centro do canal está quando `N_by` é **par**. O corpo
+passa a ser um bloco `2×2` de folhas de nível `ℓ`, e as vizinhas podem descer a
+`ℓ+1` — encostando na superfície.
+
+| Grandeza | família (a) | família (b) |
+|---|---|---|
+| `N_by` | 3 (ímpar) | 2 (par) |
+| `H_0` | `8D/3 ≈ 2,67D` | `4D` |
+| corpo | interior a 1 folha de `2,67D` | união exata de 4 folhas de `D/2` |
+| `H` junto à parede | `1,33D` | `D/4` |
+| `Lx`, `(xc, yc)` | `26,67D`, `(6,67D, 4D)` | `24D`, `(6D, 4D)` |
+| níveis | 0–2 | 0–4 |
+| `nloc` | `(32, 16, 8)` | `(64, 32, 16, 8, 4)` |
+| `h` | `D/12` | `D/16` |
+| malha global | `320 × 96` | `384 × 128` |
+
+Restrição adicional em (b): `nloc` da folha mais fina é 4, o que fica no limite
+da condição de solvabilidade que relaciona o espaço de interface à malha fina
+(Arbogast–Pencheva–Wheeler–Yotov). `plan_quadtree_geometry` passa a exigir
+`nloc_min ≥ max(degreeU, degreeP)`.
 
 ### 4.4 Critério de refinamento
 
@@ -241,6 +281,38 @@ wake_length=0.0)`:
   única folha. Com raios monotônicos o balanço nunca precisa subdividir a folha
   travada, mas o `raise` explícito é a rede de segurança — `balance_2to1` do
   mrcm não conhece o conceito de folha travada.
+
+### 4.5 Folhas sólidas (necessário apenas na família (b))
+
+Na família (b) o corpo é união exata de folhas, então passam a existir folhas
+**100 % sólidas**, e duas interfaces de Γ atravessam o sólido — inteiramente
+dentro dele, sem cortar região fluida. Três pontos exigem tratamento, todos
+auditados no código atual:
+
+1. **`MACDownscaler.solve_patch`**: com `nfluid = 0`, a normalização do defeito
+   `abs(defect)/(hx·hy·nfluid)` divide por zero e produz `nan`. O campo
+   resultante sobrevive por acidente — a matriz mascarada degenera em identidade,
+   `p = 0`, e as faces sólidas são zeradas depois — mas o caminho precisa de
+   guarda explícita: folha sem fluido devolve `ṽ = 0` sem montar sistema.
+2. **Solve local de Darcy**: `K = δt·ε` em toda a folha, logo `K⁻¹ ~ 1e6/δt`. As
+   variantes de Robin do mrcm já fazem clamp de `K` (`robin_clamp_eps`) e a
+   variante `extreme` foi construída para barreira (`robin_extreme_beta`). É
+   escolha e validação, não implementação nova.
+3. **Condicionamento de `A_Γ`**: arestas interiores ao sólido geram linhas de
+   continuidade fraca quase nulas. É o risco principal da família (b) e precisa
+   ser **medido** (número de condição estimado, resíduo do solve global), não
+   assumido benigno.
+
+O invariante que substitui "obstáculo não cruza interface" é mais preciso e vale
+para as duas famílias:
+
+> **Nenhuma folha pode ter região fluida desconexa.**
+
+A razão é estrutural: o problema local do downscaler é Neumann puro; com fluido
+em duas componentes a nulidade é 2, e o pino numa única célula remove apenas um
+modo — a projeção sairia errada sem erro nenhum. A verificação usa rotulagem de
+componentes conexas (`scipy.ndimage.label`) sobre a máscara de sólido de cada
+folha, na construção da decomposição.
 
 ---
 
@@ -265,7 +337,9 @@ von Kármán; redução mensurável no tempo por passo.
 ### Fase 2 — `mprm/decomposition.py`
 
 Implementa `Leaf`, `GammaEdge`, `Decomposition.uniform`,
-`Decomposition.from_quadtree`, `plan_quadtree_geometry`, `build_obstacle_tree`.
+`Decomposition.from_quadtree`, `plan_quadtree_geometry`, `build_obstacle_tree`
+(parametrizado pela família de alinhamento (a)/(b) de D7) e a verificação de
+conexidade do fluido por folha (§4.5).
 Popula `Skeleton.sub_nloc` com `H_i/h` (o campo existe e é lido por
 `_build_tasks`/`build_subdomain_workspace`, mas `from_quadtree` não o preenche —
 hoje o mrcm assume `nloc` igual em toda folha).
@@ -294,7 +368,8 @@ ordem do zero de máquina relativo à escala do fluxo do segmento.
 
 `MACDownscaler` passa a cachear fatorações por `(n, m, padrão de sólido)` em vez
 de manter uma única matriz. O patch é localizado por `(i0, j0, n, m)` da folha.
-Como os níveis são poucos, o número de fatorações distintas é pequeno.
+Como os níveis são poucos, o número de fatorações distintas é pequeno. Inclui a
+guarda de folha 100 % sólida (§4.5, item 1), necessária para a família (b).
 
 **Aceite:** `max|∇·u| ≤ 1e-12` no fluido com árvore adaptativa; defeito de
 compatibilidade da mesma ordem do caso uniforme.
@@ -305,10 +380,18 @@ compatibilidade da mesma ordem do caso uniforme.
 `h`**:
 
 1. cartesiano uniforme (baseline);
-2. quadtree adaptativo calibrado para igualar `n_Γ` ao baseline;
-3. quadtree adaptativo calibrado para igualar `N_sub` ao baseline;
-4. referência `ChannelFinePoisson` (Poisson global na malha fina) — o "fine mesh
+2. quadtree adaptativo, família (a), calibrado para igualar `n_Γ` ao baseline;
+3. quadtree adaptativo, família (a), calibrado para igualar `N_sub` ao baseline;
+4. quadtree adaptativo, **família (b)** — refino alcançando a superfície do
+   corpo (§4.3.1), com `nloc_min` e níveis próprios;
+5. referência `ChannelFinePoisson` (Poisson global na malha fina) — o "fine mesh
    solver" do artigo.
+
+A configuração (4) roda sobre geometria e `h` próprios (`384×128`, `h = D/16`),
+então sua comparação com (1)–(3) é feita contra a **mesma referência de malha
+fina recomputada naquela malha**, e o custo é reportado em `n_Γ` e tempo, não em
+número de células. A pergunta que ela responde: levar o refino de `H` até a
+parede compensa o preço de folhas sólidas e do `A_Γ` que elas produzem?
 
 A calibração de (2) e (3) é feita variando `radii` e `max_level`: a árvore é
 construída, `n_Γ` e `N_sub` são contados **antes** de qualquer solve, e os raios
@@ -359,7 +442,10 @@ Falhas devem aparecer na construção, não como resultado numérico plausível:
 | Verificação | Onde | Ação |
 |---|---|---|
 | `H_ℓ / h` inteiro e par em todo nível | `plan_quadtree_geometry` | `ValueError` nomeando o nível |
-| Obstáculo interior a uma única folha (antes e depois do balanço) | `build_obstacle_tree` | `ValueError` com a bbox ofensora |
+| `nloc_min ≥ max(degreeU, degreeP)` | `plan_quadtree_geometry` | `ValueError` |
+| Família (a): obstáculo interior a uma única folha (antes e depois do balanço) | `build_obstacle_tree` | `ValueError` com a bbox ofensora |
+| Família (b): obstáculo é união exata de folhas | `build_obstacle_tree` | `ValueError` com as folhas parcialmente cobertas |
+| Nenhuma folha com região fluida desconexa | `Decomposition` (§4.5) | `ValueError` nomeando a folha |
 | Balanço 2:1 | `Skeleton.from_quadtree` (já existente) | `ValueError` do mrcm |
 | Alinhamento de segmentos | `check_segment_alignment` (já existente) | `ValueError` do mrcm |
 | `h` único / `hx == hy` | `Decomposition` | `ValueError` |
@@ -390,8 +476,18 @@ mesma falha que a revisão do quadtree no `mrcm-firedrake` (§2.3 da
 6. `u·n = 0` nas faces do obstáculo; balanço de massa entrada ≈ saída.
 
 **Geometria**
-7. `plan_quadtree_geometry` rejeita `N_by` par, `H_0 ≤ D` e `nloc` ímpar.
-8. `build_obstacle_tree` mantém o obstáculo interior a uma folha após o balanço.
+7. `plan_quadtree_geometry` rejeita `nloc` ímpar, `nloc_min < grau` e, na família
+   (a), `N_by` par ou `H_0 ≤ D`.
+8. `build_obstacle_tree` mantém o obstáculo interior a uma folha após o balanço
+   (família (a)) / como união exata de folhas (família (b)).
+9. Folha com fluido desconexo é rejeitada na construção (teste sintético: faixa
+   sólida atravessando uma folha de lado a lado).
+
+**Família (b): folhas sólidas**
+10. Folha 100 % sólida devolve `ṽ = 0` sem `nan` no defeito.
+11. `max|∇·u|` e balanço de massa preservados com o corpo como bloco 2×2.
+12. Condicionamento de `A_Γ` registrado (não é critério de passa/falha — é dado
+    do estudo).
 
 **Paralelismo**
 9. Sequencial ≡ MPI (2 e 4 ranks) em árvore adaptativa, até `1e-10`.
@@ -411,10 +507,11 @@ mesma falha que a revisão do quadtree no `mrcm-firedrake` (§2.3 da
    métricas da Fase 5, em JSON e figura.
 3. A pré-fatoração reduz mensuravelmente o tempo por passo, com resultado
    numericamente idêntico.
-4. As conclusões são declaradas **com o sinal que os dados mostrarem**. Se a
-   decomposição adaptativa não superar a uniforme a `n_Γ` igual, isso é o
-   resultado — e é um resultado publicável, dado que o refinamento não pode
-   chegar à superfície do corpo (§4.3, item 3).
+4. O estudo responde, com número, se levar o refino de `H` até a superfície do
+   corpo (família (b)) compensa o custo das folhas sólidas.
+5. As conclusões são declaradas **com o sinal que os dados mostrarem**. Se a
+   decomposição adaptativa não superar a uniforme a `n_Γ` igual, ou se a família
+   (b) não superar a (a), isso é o resultado — e é um resultado publicável.
 
 ---
 
@@ -422,7 +519,8 @@ mesma falha que a revisão do quadtree no `mrcm-firedrake` (§2.3 da
 
 | Risco | Mitigação |
 |---|---|
-| O refino máximo fica a uma folha de distância do corpo (D4 + balanço 2:1), limitando o ganho junto à parede | `H_0` escolhido pouco maior que `D`; o limite é declarado no resultado, não escondido |
+| Na família (a) o refino máximo fica a uma folha de distância do corpo (D4 + balanço 2:1), limitando o ganho junto à parede | `H_0` escolhido pouco maior que `D`; a família (b) existe justamente para medir quanto isso custa |
+| Na família (b), `A_Γ` degrada por causa das arestas interiores ao sólido (linhas de continuidade fraca quase nulas) | Medir condicionamento e resíduo do solve global; se degradar, testar as variantes `extreme`/`adaptive` de Robin, para as quais esse é o cenário de projeto |
 | `Skeleton.sub_nloc` nunca foi exercitado com `nloc` variando por folha (só `CellRefinement` o popula, e a revisão do mrcm aponta que o `k_grid` não chegava à discretização) | Fase 2 valida via teste de equivalência antes de qualquer física |
 | Custo do offline cresce: sem cache de MsBF entre folhas (`cacheable=False` em modo quadtree) | Offline roda uma vez; medido e reportado separado do online |
 | Desbalanceamento de carga MPI (folhas de custo `nloc_i²` distribuídas round-robin) | Distribuição por peso `nloc_i²`; item de baixo custo, avaliado na Fase 5 |
@@ -435,7 +533,10 @@ mesma falha que a revisão do quadtree no `mrcm-firedrake` (§2.3 da
 - AMR na escala fina (`h` variável, malha MAC composta) — extensão futura, spec próprio.
 - Variantes incremental/rotacional do método de projeção (Achado 4).
 - Refinamento adaptativo a posteriori ou dentro do laço temporal (D3).
-- Interfaces atravessando o obstáculo (D4).
+- Obstáculos **não alinhados** à grade diádica (cilindro circular, corpo
+  inclinado). Ambas as famílias de D7 dependem do alinhamento do quadrado; um
+  corpo arbitrário exige folhas com fluido parcial em geometria qualquer, com a
+  análise de conexidade da §4.5 no caminho crítico.
 - Achados 2 e 3 da revisão (traço pré-montado, `Allgatherv`) — otimizações
   independentes, sem efeito sobre a validade do estudo.
 - Redação da dissertação.
