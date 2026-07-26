@@ -2,7 +2,9 @@
 
 > **Data:** 2026-07-25
 > **Repositório:** `~/mrcm/NavierStokes` (pacote `mprm`)
-> **Dependência:** `~/mrcm/mrcm-firedrake` (pacote `mrcm`)
+> **Branch:** `feature/quadtree-mprm`, com merge ao fim de cada fase
+> **Dependência:** `~/mrcm/mrcm-firedrake` (pacote `mrcm`) — sem alterações
+>   necessárias, ver §4.6
 > **Objetivo:** resolver o passo de projeção do MPrM sobre uma decomposição de
 > domínio adaptativa (quadtree) e medir, no benchmark de von Kármán, o que a
 > adaptatividade da escala grossa entrega frente à decomposição cartesiana
@@ -180,6 +182,41 @@ class Decomposition:
 uniforme (D1) — é o que torna a média da Eq. 21 uma operação face a face mesmo
 na presença de nó pendurado, sem qualquer operador de restrição/prolongação.
 
+### 4.2.1 Composição dos fluxos de contorno de uma folha
+
+O downscaler precisa de quatro vetores (`fS, fE, fN, fW`) por folha, mas sob
+quadtree **um lado pode ser composto por dois segmentos** com vizinhos
+diferentes. A indexação cartesiana atual (`fluxes[("v", ix, iy)]`) não expressa
+isso. A montagem passa por:
+
+```python
+def leaf_boundary_fluxes(decomp, flux_avg, isub):
+    """Vetores de fluxo dos 4 lados da folha, montados a partir dos
+    segmentos de Γ que a tocam.
+
+    Convenção de lados do mrcm: 0=bottom, 1=right, 2=top, 3=left.
+    Lados horizontais (0, 2) têm nlocx entradas e indexam por x;
+    verticais (1, 3) têm nlocy e indexam por y.
+    """
+    leaf = decomp.leaf(isub)
+    f = {0: np.zeros(leaf.nlocx), 1: np.zeros(leaf.nlocy),
+         2: np.zeros(leaf.nlocx), 3: np.zeros(leaf.nlocy)}
+    for side, seg, flux, bbox in decomp.segments_of(isub, flux_avg):
+        horiz = side in (0, 2)
+        origin = leaf.x0 if horiz else leaf.y0
+        start  = bbox[0]  if horiz else bbox[1]
+        off = int(round((start - origin) / decomp.h))
+        f[side][off:off + flux.size] = flux
+    return f[0], f[1], f[2], f[3]
+```
+
+Faces externas sem aresta de Γ permanecem zeradas (o que é a condição correta
+para parede, deslizamento e entrada); lados de saída são sobrescritos pelos
+traços reconstruídos, como já ocorre hoje. `off` ser inteiro exato é garantido
+pelo alinhamento de segmentos verificado na construção (§7): com `h` uniforme,
+o segmento de um nó pendurado cobre exatamente metade das faces finas do lado
+grosso, de modo que a composição é concatenação, sem interpolação.
+
 ### 4.3 Geometria: restrições e como são resolvidas
 
 O quadtree é diádico: toda fronteira de folha cai em múltiplo de `H_0/2^ℓ`. Esta
@@ -314,6 +351,27 @@ modo — a projeção sairia errada sem erro nenhum. A verificação usa rotulag
 componentes conexas (`scipy.ndimage.label`) sobre a máscara de sólido de cada
 folha, na construção da decomposição.
 
+### 4.6 Estado verificado das dependências no `mrcm-firedrake`
+
+A `RevisaoQuadtree.md` do `mrcm-firedrake` lista problemas do quadtree, mas é
+**anterior** às correções documentadas em
+`handoffs/2026-07-25-quadtree-session-review.md`. Verificado no código em
+2026-07-25, antes de planejar as fases:
+
+| Dependência | Estado | Evidência |
+|---|---|---|
+| `nloc` por folha chega à malha local | **Já implementado** | `solver.py:124-127` preenche `geom["nlocx"]/["nlocy"]` a partir de `skeleton.sub_nloc`; `local_solver.py:954-955` lê `geom.get("nlocx", cfg.nlocx)`. `Decomposition.task()` só precisa preencher os mesmos campos |
+| `sub_nloc` | Shape `(Nsubd, 2)` = `(nlocx, nlocy)` | `topology.py:213-218`; populado hoje só por `CellRefinement` (`cell_refinement.py:345`) |
+| Validação de balanço 2:1 em `from_quadtree` | **Já implementado** | `topology.py:324-332`, `ValueError` explícito |
+| `_estimate_contrast` amostrado / `from_uniform` com razão de aspecto / `basis_per_side` | Corrigidos | handoff 2026-07-25, itens 1.1–1.8. Irrelevantes aqui: o MPrM usa critério geométrico próprio |
+| Hash do skeleton entre ranks | **Pendente** | Sem implementação no mrcm; é responsabilidade desta spec (§7) |
+| `use_fine_reference` + MPI + quadtree | Irrelevante | O MPrM não usa `MRCMSolver`; a referência fina é `ChannelFinePoisson` (SciPy) |
+
+Consequência prática: **não há pré-requisito bloqueante no `mrcm-firedrake`**. O
+que falta é exercitar `sub_nloc` com valores *heterogêneos*, coisa que nunca
+aconteceu (o docstring de `Skeleton` afirma que em modo quadtree "every leaf
+carries the same cell count"). Daí o teste dedicado em §8.
+
 ---
 
 ## 5. Fases de implementação
@@ -371,6 +429,14 @@ de manter uma única matriz. O patch é localizado por `(i0, j0, n, m)` da folha
 Como os níveis são poucos, o número de fatorações distintas é pequeno. Inclui a
 guarda de folha 100 % sólida (§4.5, item 1), necessária para a família (b).
 
+`solve_patch` passa a **retornar** o defeito de compatibilidade junto com
+`(ṽ₁, ṽ₂)`, em vez de acumulá-lo no atributo `last_defect`. Duas razões: o
+atributo atual é um `max` que nunca é reiniciado entre passos (mede o pior
+instante de toda a simulação, não do passo), e sob quadtree a normalização
+`|defeito|/(h²·n·m)` tem escala diferente por folha — um `max` sobre folhas de
+tamanhos distintos mistura grandezas. O chamador agrega e reporta por folha e
+por passo.
+
 **Aceite:** `max|∇·u| ≤ 1e-12` no fluido com árvore adaptativa; defeito de
 compatibilidade da mesma ordem do caso uniforme.
 
@@ -408,6 +474,46 @@ explicitamente a diferença.
 **Métricas por configuração:** `C_D` médio, amplitude de `C_L`, `St`,
 `‖u − u_ref‖₂/‖u_ref‖₂`, `max|∇·u|`, defeito de compatibilidade, `N_sub`, `n_Γ`,
 `min/max H`, tempo de offline e tempo de online separados.
+
+**Formato de saída.** O JSON é o artefato que alimenta as tabelas e figuras da
+dissertação, então o schema é fixado aqui:
+
+```json
+{
+  "geometry": {"family": "a", "Lx": 26.67, "Ly": 8.0, "D": 1.0,
+               "h": 0.0833, "Nx": 320, "Ny": 96, "xc": 6.67, "yc": 4.0},
+  "flow": {"Re": 100, "U_in": 1.0, "inflow": "parabolic",
+           "inflow_norm": "max", "walls": "slip", "dt": 0.0333, "T": 40.0},
+  "spaces": {"degreeU": 1, "degreeP": 3, "alpha": 1.0,
+             "basis_kind": "legendre_P"},
+  "configs": [
+    {"label": "cartesian_uniform_10x3",
+     "N_sub": 30, "n_gamma_edges": 47, "n_gamma_dofs": 282,
+     "H_min": 2.67, "H_max": 2.67, "levels": [0],
+     "cond_A_gamma": 1.4e3,
+     "t_offline_s": 0.0, "t_online_per_step_s": 0.0,
+     "Cd_mean": 0.0, "Cd_std": 0.0, "Cl_amp": 0.0, "St": 0.0,
+     "div_max": 0.0, "defect_max": 0.0, "err_u_rel": 0.0}
+  ]
+}
+```
+
+Os valores numéricos acima são o *schema*, não resultados — exceto os campos
+estruturais do baseline, que são deriváveis: uma grade `10×3` tem
+`9·3 + 10·2 = 47` arestas internas, e com `degreeU=1, degreeP=3`
+(`ndofsU = degreeU+1 = 2`, `ndofsP = degreeP+1 = 4`) são `47·6 = 282` graus de
+liberdade de interface. `cond_A_gamma` é a métrica que responde ao risco das
+folhas sólidas na família (b).
+
+### 5.6 Relação com o plano de validação de von Kármán
+
+`docs/11-plano-validacao-von-karman.md` define quatro fases de validação. A
+Fase 5 desta spec **absorve** as duas primeiras (setup do artigo e comparação
+contra a referência de malha fina), porque roda exatamente essa configuração
+como baseline. A varredura de parâmetros daquele plano (`α ∈ {10⁻⁶, 1, 10⁶}`,
+graus `k = 1, 2, 3`) é **ortogonal** à decomposição e deve ser feita depois,
+sobre a melhor decomposição identificada — rodá-la agora multiplicaria o custo
+por um fator que não informa a pergunta desta spec.
 
 ---
 
@@ -467,6 +573,12 @@ mesma falha que a revisão do quadtree no `mrcm-firedrake` (§2.3 da
 2. Projeção com árvore uniforme ≡ caminho cartesiano atual, campo a campo (`1e-12`).
 3. Fase 1 (pré-fatoração) ≡ caminho de remontagem, campo a campo (`1e-12`).
 
+**`nloc` heterogêneo (nunca exercitado — §4.6)**
+3b. Com `sub_nloc` variando entre folhas, a malha local de cada folha tem
+    exatamente `nlocx_i × nlocy_i` células e cobre a bbox da folha. É o elo que
+    nunca rodou com valores diferentes por folha; se falhar, todos os testes de
+    corretude abaixo falham por consequência.
+
 **Corretude sob adaptatividade**
 4. `max|∇·u|` no fluido `≤ 1e-12` com árvore adaptativa (cavidade e von Kármán).
 5. Continuidade fraca de fluxo nas arestas penduradas: salto ponderado
@@ -522,7 +634,7 @@ mesma falha que a revisão do quadtree no `mrcm-firedrake` (§2.3 da
 | Na família (a) o refino máximo fica a uma folha de distância do corpo (D4 + balanço 2:1), limitando o ganho junto à parede | `H_0` escolhido pouco maior que `D`; a família (b) existe justamente para medir quanto isso custa |
 | Na família (b), `A_Γ` degrada por causa das arestas interiores ao sólido (linhas de continuidade fraca quase nulas) | Medir condicionamento e resíduo do solve global; se degradar, testar as variantes `extreme`/`adaptive` de Robin, para as quais esse é o cenário de projeto |
 | `Skeleton.sub_nloc` nunca foi exercitado com `nloc` variando por folha (só `CellRefinement` o popula, e a revisão do mrcm aponta que o `k_grid` não chegava à discretização) | Fase 2 valida via teste de equivalência antes de qualquer física |
-| Custo do offline cresce: sem cache de MsBF entre folhas (`cacheable=False` em modo quadtree) | Offline roda uma vez; medido e reportado separado do online |
+| Custo do offline cresce: sem cache de MsBF entre folhas (`cacheable=False` em modo quadtree), e a folha de nível 0 tem `nloc = 32` (família (a)) ou `64` (família (b)) | Offline roda uma vez, medido e reportado separado do online. Contingência, se exceder o aceitável: reduzir um nível de refinamento (o que reduz `nloc_0` pela metade) antes de reduzir `nloc_min`, que está travado por `nloc_min ≥ max(degreeU, degreeP)` |
 | Desbalanceamento de carga MPI (folhas de custo `nloc_i²` distribuídas round-robin) | Distribuição por peso `nloc_i²`; item de baixo custo, avaliado na Fase 5 |
 | Mudança de geometria invalida comparação com resultados anteriores | Aceito explicitamente (D6): a comparação que importa é com Lages e Breuer |
 
