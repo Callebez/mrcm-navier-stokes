@@ -5,7 +5,7 @@
 - **Data:** 2026-07-26
 - **Commit antes:** `577d9bb` (`git rev-parse --short HEAD` antes de começar, na branch
   `feature/quadtree-mprm`)
-- **Commit depois:** preenchido após `git log --oneline -1` logo após o commit do Passo 6
+- **Commit depois:** `3a65903` (`git log --oneline -1` logo após o commit do Passo 6)
 - **Arquivos criados:**
   - `mprm/triplets.py`
   - `tests/test_triplets.py`
