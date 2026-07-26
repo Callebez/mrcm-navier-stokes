@@ -47,7 +47,10 @@ def test_cavity_transporte_bit_identico_ao_legado():
     hx = hy = 1.0 / N; dt = 1e-3; nu = 1e-2; lid = 1.3
     w1a, w2a = _wstar_legacy(u, v, hx, hy, dt, nu, lid)
     prob = cavity_problem(N, Re=lid / nu, lid_velocity=lid)
-    w1b, w2b = mac_transport(u, v, prob, dt)
+    # _wstar_legacy é upwind de 1ª ordem; mac_transport tem default
+    # convective_order=2 desde o commit 4e40213. Fixamos 1 para que o teste
+    # continue medindo o que se propõe a medir: equivalência do estêncil.
+    w1b, w2b = mac_transport(u, v, prob, dt, convective_order=1)
     assert np.allclose(w1a, w1b, atol=1e-14, rtol=0)
     assert np.allclose(w2a, w2b, atol=1e-14, rtol=0)
 
