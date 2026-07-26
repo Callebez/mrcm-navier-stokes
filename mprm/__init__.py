@@ -4,6 +4,7 @@ Pacote modular com submódulos:
   mprm.problem    — SideBC, FlowProblem, construtores (NumPy puro)
   mprm.transport  — mac_transport, mac_wstar, mac_divergence (NumPy puro)
   mprm.downscaler — MACDownscaler (SciPy, sem Firedrake)
+  mprm.decomposition — Decomposition, Leaf, GammaEdge (camada de topologia)
   mprm.projector  — MPrMProjector (Firedrake)
   mprm.forces     — ChannelFinePoisson, obstacle_forces, strouhal (NumPy/SciPy)
   mprm.flow       — run_flow, run_cavity, run_von_karman
@@ -31,6 +32,9 @@ from mprm.transport import (
 
 # ── Downscaler ─────────────────────────────────────────────────────────────
 from mprm.downscaler import MACDownscaler
+
+# ── Decomposição (uniforme e quadtree) ────────────────────────────────────
+from mprm.decomposition import Decomposition, Leaf, GammaEdge
 
 # ── Projector (MRCM) ──────────────────────────────────────────────────────
 from mprm.projector import MPrMProjector
