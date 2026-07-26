@@ -1,5 +1,15 @@
 # Relatório — Tarefa 2: Montar e fatorar A_Γ no offline do projetor
 
+> **Nota de atualização (mesma data):** a revisão de código pós-implementação
+> encontrou dois problemas graves na forma como o achado de mal-condicionamento
+> (seção 4/5 abaixo) foi compensado em `tests/test_prefactorization.py`, mais
+> dois pontos de robustez adicionais. Corrigido — ver **seção 10** para o
+> relatório de fix completo (o que mudou, comandos/saídas, contagem final de
+> testes). As seções 1-9 abaixo registram o processo original de
+> implementação e diagnóstico; são mantidas como estavam por valor histórico,
+> mas a seção 10 é a versão vigente do estado dos testes e do arquivo
+> `tests/test_prefactorization.py`.
+
 ## 1. Identificação
 - **Tarefa:** 2 — Montar e fatorar `A_Γ` no offline do projetor
 - **Data:** 2026-07-26
@@ -323,3 +333,171 @@ já esperado e explicado na seção 4.
   `cfg.iterative_threshold`) — `solve_interface`'s ramo `_solve_iterative`
   está implementado conforme o brief mas sem cobertura de teste direta
   nesta tarefa.
+
+## 10. Correção pós-revisão (fix report)
+
+- **Data:** 2026-07-26 (mesmo dia, revisão de código imediatamente após a
+  seção 1-9 acima).
+- **Commit antes do fix:** `bb96f8a`.
+- **Arquivos modificados:** `mprm/projector.py`, `tests/test_prefactorization.py`.
+
+### 10.1 O que a revisão encontrou
+
+A implementação de `mprm/projector.py` (montagem/fatoração de `A_Γ`,
+`solve_interface`, etapa 2 de `project()`) foi confirmada correta de forma
+independente pelo revisor: `A_Γ`, `b` e até `X` são bit-idênticos entre o
+caminho antigo e o novo, e o ganho de 82.8× foi confirmado. O problema
+estava inteiramente em como `tests/test_prefactorization.py` compensou o
+achado genuíno de mal-condicionamento (seção 4/5 acima):
+
+1. **Crítico 1 — tolerância `1e-2` sem poder de detecção.** Um bug de
+   escala de 1% no RHS (`b *= 1.01`) passava no teste antigo
+   (`err=6.58e-3 < 1e-2`); variando a semente do RNG, o pior caso em 40
+   sementes dava `err=9.396e-3` — margem de só 6% contra o limiar. A
+   semente 3 (`err=5.365e-3`) foi sorte, não uma garantia.
+2. **Crítico 2 — checagem de resíduo tautológica.** Comparava
+   `proj.A_gamma @ X_novo` contra um `b_check` recomputado com a MESMA
+   `subdomain_rhs` do caminho novo — o caminho antigo nunca entrava na
+   conta. Mesmo com `b *= -1.0` (sinal invertido), o resíduo dava `1.35e-17`
+   e passava em `1e-10`: testava só que o SuperLU resolve o sistema que
+   recebeu (sempre verdade), não a equivalência com o caminho antigo.
+3. **Importante 3 — faltava comparação bit-exata de `A_Γ`/`b` commitada.**
+   Só havia menção em prosa no relatório (`max|diff|=0.0`), medida ad hoc.
+4. **Importante 4 — `splu` sem tratamento de falha aborta a construção.**
+   `spla.splu(A)` no construtor pode levantar `RuntimeError: Factor is
+   exactly singular` num pivô estruturalmente nulo; o caminho antigo
+   (`spsolve`/UMFPACK) tolerava matrizes quase singulares emitindo só um
+   aviso.
+5. **Importante 5 — reprodutibilidade do número de condição.** Precisa estar
+   em código de teste, não só em prosa.
+
+### 10.2 O que mudou
+
+**`mprm/projector.py`** (linhas ~261-278, único trecho tocado): o
+`self.lu_gamma = spla.splu(A)` do construtor passou a estar dentro de um
+`try/except RuntimeError`; em caso de falha (deficiência de posto
+estrutural), cai para `self.lu_gamma = None` — o mesmo estado que o ramo
+`cfg.global_solver == "iterative"` já produzia, resolvido via
+`_solve_iterative` dentro de `solve_interface` — em vez de propagar a
+exceção e derrubar a construção do `MPrMProjector`. Um `logging.getLogger("mprm").warning(...)`
+registra o motivo, no mesmo espírito do `_make_ilu_preconditioner` de
+`mrcm/global_assembly.py:178-194` (que já faz exatamente esse padrão
+try/except-e-avisa para `spilu`).
+
+**`tests/test_prefactorization.py`** (reescrito por completo, 7 testes no
+lugar de 3):
+
+1. **`test_A_gamma_bit_identica_ao_caminho_de_remontagem`** (novo, Importante 3):
+   compara `proj.A_gamma` bit a bit (`max|diff| == 0.0`) contra a matriz que
+   o caminho antigo (`compute_subdomain_triplets` + `assemble_from_triplets`)
+   monta, e o mesmo para `b`. Usa o problema de canal (ver item 2).
+2. **`test_X_identico_ao_caminho_de_remontagem`** (Crítico 1 e 2): a fixture
+   trocou o problema impermeável default por um problema de **canal**
+   (`left="inflow"`, `right="outflow"`, `top`/`bottom`="wall"`, via
+   `mprm.problem.FlowProblem`/`SideBC`) — isso dá posto cheio a `A_Γ`
+   (`rank=16/16`, `cond≈94.95` nesta config, medido no teste seguinte).
+   A tolerância voltou a `atol=1e-12` (Restrição Global 6 do plano), sem
+   nenhum afrouxamento. A checagem de resíduo tautológica foi **removida**
+   por completo. Erro medido: `2.220446049250313e-16` (4 ordens de folga
+   abaixo de `1e-12`).
+3. **`test_matriz_fatorada_uma_vez_e_reutilizada`** — inalterado.
+4. **`test_cavidade_ponta_a_ponta_inalterada`** — inalterado.
+5. **`test_A_gamma_impermeavel_e_deficiente_de_posto`** (novo, separado):
+   preserva o achado genuíno do mal-condicionamento SEM tocar a tolerância
+   do teste principal. Usa o problema impermeável default e afirma, em
+   código (Importante 5): `np.linalg.matrix_rank(A) == n_gamma - 1` e
+   `np.linalg.cond(A) > 1e12`.
+6. **`test_impermeavel_nao_quebra_construcao_do_projetor`** (novo,
+   Importante 4): constrói o projetor com o problema impermeável default e
+   confirma que a construção e um `project()` não levantam exceção e que
+   `X` é finito. Nesta config específica `splu` não chega a levantar (posto
+   deficiente por `~4.4e-16` relativo, não estruturalmente zero — ver
+   próximo item), então este teste por si só não exercita o `except` novo.
+7. **`test_splu_singular_cai_para_solver_iterativo`** (novo, Importante 4):
+   como não foi possível reproduzir naturalmente o `RuntimeError` do SciPy
+   nas configs de teste deste arquivo (confirmado: forçando manualmente uma
+   linha/coluna nula em `A_Γ`, `splu` levanta `Factor is exactly singular`;
+   nas configs naturais testadas, o menor valor singular relativo é
+   `~4e-16`, pequeno mas não exatamente zero, e `splu` não levanta), este
+   teste usa `monkeypatch` para substituir `mprm.projector.spla` (só a
+   referência local ao módulo dentro de `mprm.projector` — não o
+   `scipy.sparse.linalg` real usado por `mrcm.local_solver` para a
+   fatoração local de cada subdomínio) por um objeto cujo `splu` sempre
+   levanta. Confirma que o construtor não propaga a exceção, que
+   `lu_gamma` fica `None`, e que `project()` roda via `_solve_iterative`.
+   Verificado que este teste **falha** (`RuntimeError` propaga) se o
+   `try/except` for removido de `mprm/projector.py` — confirmando que o
+   teste de fato exercita o fix (não é vacuamente verdadeiro).
+
+### 10.3 Verificação de robustez (Crítico 1)
+
+Repeti os dois ataques adversariais do revisor contra a nova fixture
+(canal, `atol=1e-12`), fora do pytest, para confirmar poder de detecção:
+
+```python
+X_bug_scale = proj.lu_gamma.solve(b_old * 1.01)   # bug de escala de 1%
+# err vs X_ref: 8.347283639722036e-3   -> FALHARIA em atol=1e-12
+
+X_bug_sign = proj.lu_gamma.solve(-b_old)          # sinal invertido
+# err vs X_ref: 1.6694567279444459     -> FALHARIA em atol=1e-12
+```
+
+E a estabilidade entre sementes (o problema do Crítico 1: pior caso em 40
+sementes dava `9.396e-3` contra o limiar `1e-2` antigo — margem de 6%):
+
+```python
+# 40 sementes (0..39), problema de canal, atol-alvo 1e-12
+pior erro relativo em 40 sementes: 9.469644697733592e-16
+```
+
+4 ordens de magnitude de folga contra `1e-12` no pior caso — não é mais
+uma questão de sorte de semente.
+
+### 10.4 Comandos e saídas
+
+```bash
+source ~/venv-firedrake/bin/activate
+python -m pytest tests/test_prefactorization.py -v
+```
+
+```
+tests/test_prefactorization.py::test_A_gamma_bit_identica_ao_caminho_de_remontagem PASSED
+tests/test_prefactorization.py::test_X_identico_ao_caminho_de_remontagem PASSED
+tests/test_prefactorization.py::test_matriz_fatorada_uma_vez_e_reutilizada PASSED
+tests/test_prefactorization.py::test_cavidade_ponta_a_ponta_inalterada PASSED
+tests/test_prefactorization.py::test_A_gamma_impermeavel_e_deficiente_de_posto PASSED
+tests/test_prefactorization.py::test_impermeavel_nao_quebra_construcao_do_projetor PASSED
+tests/test_prefactorization.py::test_splu_singular_cai_para_solver_iterativo PASSED
+
+7 passed in 35.94s
+```
+
+```bash
+python -m pytest tests/ -q
+```
+
+```
+28 passed in 70.78s
+```
+
+`tests/test_prefactorization.py` foi de 3 para 7 testes (o
+`test_X_identico_ao_caminho_de_remontagem` original foi reescrito, não
+contado como novo; os 4 novos são `test_A_gamma_bit_identica_ao_caminho_de_remontagem`,
+`test_A_gamma_impermeavel_e_deficiente_de_posto`,
+`test_impermeavel_nao_quebra_construcao_do_projetor` e
+`test_splu_singular_cai_para_solver_iterativo`). Total da suíte: **21
+baseline + 7 = 28 passed**, todos verdes, zero regressão, zero warning
+(o `UmfpackWarning` que aparecia antes do fix desapareceu porque a
+comparação de equivalência não passa mais pelo caminho quase singular).
+
+### 10.5 Sem mudança de lógica de negócio
+
+Confirmado pelo revisor e reforçado aqui: nenhuma linha de
+`mprm/projector.py` relativa à montagem/fatoração/solve de `A_Γ` mudou por
+causa do achado de mal-condicionamento — só o `try/except` do Importante 4
+foi adicionado (uma melhoria de robustez genuína, não uma correção de bug
+na lógica original). Todo o resto do fix está em
+`tests/test_prefactorization.py`: fixture trocada (canal em vez de
+impermeável) para a comparação de equivalência, achado de
+mal-condicionamento isolado num teste próprio e reproduzível, checagem
+tautológica removida, comparação bit-exata de `A_Γ`/`b` adicionada.

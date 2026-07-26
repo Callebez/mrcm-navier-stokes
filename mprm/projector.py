@@ -261,7 +261,22 @@ class MPrMProjector:
             if cfg.global_solver == "iterative" and self.n_gamma > cfg.iterative_threshold:
                 self.lu_gamma = None      # caminho iterativo: resolve por passo
             else:
-                self.lu_gamma = spla.splu(A)
+                try:
+                    self.lu_gamma = spla.splu(A)
+                except RuntimeError as exc:
+                    # A_Γ pode ser deficiente de posto (ex.: Neumann puro no
+                    # problema impermeável — o modo de pressão constante).
+                    # O caminho antigo (spsolve/UMFPACK) tolerava isso e só
+                    # emitia aviso; splu pode levantar "Factor is exactly
+                    # singular" num pivô nulo. Preserva o comportamento
+                    # antigo: cai para o solver iterativo por passo em vez
+                    # de derrubar a construção do projetor inteiro.
+                    import logging
+                    logging.getLogger("mprm").warning(
+                        "splu falhou em A_Γ (%s) — provável deficiência de "
+                        "posto; solve_interface usará o solver iterativo "
+                        "por passo.", exc)
+                    self.lu_gamma = None
 
         self.last_X = None
         self.last_pT = {}
