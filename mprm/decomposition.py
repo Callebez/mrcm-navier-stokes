@@ -166,6 +166,237 @@ class Decomposition:
                 "problem": problem}
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Geometria do quadtree (spec §4.3 e §4.3.1)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plan_quadtree_geometry(*, D, Ly, N_bx, N_by, max_level, nloc_min,
+                           family, degreeU=1, degreeP=3):
+    """Resolve as restrições geométricas e devolve a configuração completa.
+
+    O quadtree é diádico: toda fronteira de folha cai em múltiplo de H0/2^ℓ.
+    Duas famílias de alinhamento entre corpo e árvore (spec, decisão D7):
+
+    * ``family="a"`` — o corpo fica **contido no interior** de uma folha, que
+      por isso não pode ser subdividida. Exige ``N_by`` ímpar (o centro do
+      canal precisa ser o centro de uma célula base) e ``H0 > D``.
+    * ``family="b"`` — o corpo é a **união exata** de um bloco 2×2 de folhas de
+      nível ``body_level``, com ``D = 2·H[body_level]``. Exige ``N_by`` par (o
+      centro do canal é um vértice da grade). É a única forma de o refino
+      alcançar a superfície: com o corpo em uma única folha de nível ℓ≥1 e
+      centrado, Ly/D teria de ser ímpar e par ao mesmo tempo.
+
+    Raises
+    ------
+    ValueError
+        Nomeando a restrição violada e o parâmetro a corrigir.
+    """
+    if family not in ("a", "b"):
+        raise ValueError(f"family deve ser 'a' ou 'b', recebido {family!r}")
+    if family == "a" and N_by % 2 == 0:
+        raise ValueError(
+            f"family='a' exige N_by ímpar (recebido {N_by}): com N_by par, "
+            f"y=Ly/2 é fronteira de folha em todo nível e nenhuma folha "
+            f"contém o corpo centrado.")
+    if family == "b" and N_by % 2 != 0:
+        raise ValueError(
+            f"family='b' exige N_by par (recebido {N_by}): o centro do corpo "
+            f"precisa cair num vértice da grade diádica.")
+
+    H0 = Ly / N_by
+    Lx = N_bx * H0
+    H = [H0 / 2 ** l for l in range(max_level + 1)]
+    h = H[max_level] / nloc_min
+    nloc = [int(round(Hl / h)) for Hl in H]
+
+    if nloc_min < max(degreeU, degreeP):
+        raise ValueError(
+            f"nloc_min={nloc_min} < max(degreeU={degreeU}, degreeP={degreeP}): "
+            f"o espaço de interface ficaria mais rico que a malha fina do "
+            f"segmento (Arbogast et al., condição de solvabilidade).")
+    for l, (Hl, nl) in enumerate(zip(H, nloc)):
+        if abs(Hl / h - nl) > 1e-9 * nl:
+            raise ValueError(
+                f"nível {l}: H={Hl:.6g} não é múltiplo inteiro de h={h:.6g}.")
+        if nl % 2 != 0:
+            raise ValueError(
+                f"nível {l}: nloc={nl} é ímpar. Um segmento de nó pendurado "
+                f"terminaria no meio de uma célula e a base de interface, que "
+                f"é mascarada por célula, integraria intervalos diferentes nos "
+                f"dois lados (mrcm/topology.py:109-160). Use nloc_min par.")
+
+    Nx, Ny = int(round(Lx / h)), int(round(Ly / h))
+    for name, val, tot in (("Nx", Nx, Lx), ("Ny", Ny, Ly)):
+        if abs(tot / h - val) > 1e-9 * val:
+            raise ValueError(f"{name}: {tot:.6g}/h não é inteiro.")
+
+    yc = 0.5 * Ly
+    if family == "a":
+        if H0 <= D:
+            raise ValueError(
+                f"family='a' exige H0 > D: H0={H0:.6g}, D={D:.6g}. A folha que "
+                f"contém o corpo não pode ser subdividida, então ela precisa "
+                f"caber o corpo inteiro.")
+        body_level = 0
+        # xc no centro de uma célula base, o mais próximo de 1/4 do canal.
+        k = max(0, int(round(0.25 * N_bx - 0.5)))
+        xc = (k + 0.5) * H0
+    else:
+        # D = 2·H[body_level] -> o corpo é um bloco 2x2 desse nível.
+        cand = [l for l, Hl in enumerate(H) if abs(D - 2 * Hl) <= 1e-9 * D]
+        if not cand:
+            raise ValueError(
+                f"family='b' exige D = 2·H[ℓ] para algum nível: "
+                f"D={D:.6g}, H={[f'{x:.4g}' for x in H]}. Ajuste N_by, Ly ou "
+                f"max_level.")
+        body_level = cand[0]
+        if body_level >= max_level:
+            raise ValueError(
+                f"body_level={body_level} == max_level={max_level}: não sobra "
+                f"nível para refinar as vizinhas do corpo, que é o objetivo "
+                f"da family='b'. Aumente max_level.")
+        Hb = H[body_level]
+        k = max(1, int(round(0.25 * Lx / Hb)))
+        xc = k * Hb                       # vértice da grade do nível do corpo
+    return {"family": family, "D": D, "Lx": Lx, "Ly": Ly, "H0": H0,
+            "H": H, "nloc": nloc, "h": h, "Nx": Nx, "Ny": Ny,
+            "xc": xc, "yc": yc, "N_bx": N_bx, "N_by": N_by,
+            "max_level": max_level, "body_level": body_level}
+
+
+def build_obstacle_tree(geom: dict, radii, wake_length: float = 0.0):
+    """Constrói a árvore refinada em torno do obstáculo (spec §4.4).
+
+    Uma folha de nível ``ℓ`` é subdividida sse ``ℓ < max_level`` e a distância
+    da sua bbox à bbox do corpo é ``<= radii[ℓ]``. ``radii`` deve ser
+    estritamente decrescente — é o que garante que o anel mais fino envolve o
+    corpo em vez de aparecer solto no domínio.
+
+    ``wake_length > 0`` estende a região refinada a jusante (x > xc); o default
+    é isotrópico.
+
+    Na família (a) a folha que contém o corpo é travada e nunca subdividida, e
+    o refino em volta dela é **gradado** (ver ``_cap_de_nivel``).
+    Na família (b) o corpo é refinado até ``body_level`` para virar um bloco
+    2×2 exato, e não além.
+    """
+    from mrcm.quadtree import QuadTree, QuadTreeNode
+
+    D, xc, yc = geom["D"], geom["xc"], geom["yc"]
+    Lx, Ly = geom["Lx"], geom["Ly"]
+    N_bx, N_by = geom["N_bx"], geom["N_by"]
+    max_level, family = geom["max_level"], geom["family"]
+    body_level = geom["body_level"]
+    radii = list(radii)
+    if any(radii[i] <= radii[i + 1] for i in range(len(radii) - 1)):
+        raise ValueError(f"radii deve ser estritamente decrescente: {radii}")
+    if len(radii) < max_level:
+        raise ValueError(
+            f"radii tem {len(radii)} entradas para max_level={max_level}; "
+            f"são necessárias {max_level} (uma por nível subdividível).")
+
+    bx0, bx1 = xc - D / 2, xc + D / 2
+    by0, by1 = yc - D / 2, yc + D / 2
+
+    # Grade base de células quadradas (H0 x H0). `QuadTree.from_uniform` exige
+    # potências de dois, o que N_by ímpar viola; montamos a raiz à mão.
+    H0 = geom["H0"]
+    root = QuadTreeNode(0.0, 0.0, Lx, Ly, 0)
+    root.children = [
+        QuadTreeNode(i * H0, j * H0, (i + 1) * H0, (j + 1) * H0, 0)
+        for j in range(N_by) for i in range(N_bx)
+    ]
+    qt = QuadTree(root=root, max_level=max_level, Lx=Lx, Ly=Ly)
+
+    def _dist_ao_corpo(nd):
+        dx = max(bx0 - nd.x1, 0.0, nd.x0 - bx1)
+        dy = max(by0 - nd.y1, 0.0, nd.y0 - by1)
+        return float(np.hypot(dx, dy))
+
+    def _contem_o_corpo(nd):
+        return (nd.x0 <= bx0 + 1e-12 and nd.x1 >= bx1 - 1e-12 and
+                nd.y0 <= by0 + 1e-12 and nd.y1 >= by1 - 1e-12)
+
+    def _dentro_do_corpo(nd):
+        return (nd.x0 >= bx0 - 1e-12 and nd.x1 <= bx1 + 1e-12 and
+                nd.y0 >= by0 - 1e-12 and nd.y1 <= by1 + 1e-12)
+
+    # A folha travada da família (a): a célula base que contém o corpo. Ela
+    # nunca é subdividida, mas `balance_2to1` (mrcm/quadtree.py:415-441) não
+    # sabe disso — se uma vizinha imediata chegar a nível `travada+2`, o
+    # balanço subdivide a travada e o corpo deixa de caber numa única folha.
+    travada = next((nd for nd in root.children if _contem_o_corpo(nd)), None)
+    if family == "a" and travada is None:
+        raise ValueError(
+            f"family='a': nenhuma célula base contém o corpo "
+            f"[{bx0:.6g},{bx1:.6g}]x[{by0:.6g},{by1:.6g}]. Verifique xc/yc.")
+
+    def _cap_de_nivel(nd):
+        """Nível máximo desta folha por gradação em volta da travada.
+
+        Implementa spec §4.3 item 3 ("as vizinhas imediatas ficam em nível 1,
+        o anel seguinte em nível 2"): o anel que encosta na travada fica em
+        `travada.level + 1`, e cada nível extra só é liberado quando cabe,
+        entre a folha e a travada, um anel de cada nível intermediário — o
+        buffer de gradação de de Berg et al., §14.3. Com esse cap o balanço
+        2:1 nunca precisa tocar a folha travada.
+        """
+        gap = max(travada.x0 - nd.x1, nd.x0 - travada.x1,
+                  travada.y0 - nd.y1, nd.y0 - travada.y1, 0.0)   # distância L∞
+        Ht = travada.x1 - travada.x0
+        m = 1
+        while (travada.level + m < max_level
+               and gap >= Ht * (1.0 - 2.0 ** -m) - 1e-12 * Ht):
+            m += 1
+        return travada.level + m
+
+    while True:
+        mudou = False
+        for lf in qt._collect_leaves(use_cache=False):
+            if lf.level >= max_level:
+                continue
+            if family == "a" and lf is travada:
+                continue                      # folha travada (decisão D4)
+            if family == "a" and lf.level >= _cap_de_nivel(lf):
+                continue                      # anel gradado junto à travada
+            if family == "b" and _dentro_do_corpo(lf) and lf.level >= body_level:
+                continue                      # o corpo já é o bloco exato
+            if family == "b" and _contem_o_corpo(lf) and lf.level < body_level:
+                lf.subdivide(); mudou = True   # desce até o corpo virar 2x2
+                continue
+            d = _dist_ao_corpo(lf)
+            if wake_length > 0.0 and lf.cx > xc and abs(lf.cy - yc) <= wake_length:
+                d = min(d, max(0.0, lf.cx - bx1) * 0.5)
+            if d <= radii[lf.level]:
+                lf.subdivide(); mudou = True
+        if not mudou:
+            break
+        qt._invalidate_cache()
+        qt.balance_2to1()
+
+    qt._invalidate_cache()
+    qt.balance_2to1()
+
+    # Validação pós-balanço: o balanceamento pode ter subdividido a folha
+    # travada. Com o cap de nível acima isso não deve ocorrer, mas silenciar
+    # essa verificação transformaria uma violação de D4 em resultado plausível.
+    if family == "a":
+        n = sum(1 for lf in qt.leaves if _contem_o_corpo(lf))
+        if n != 1:
+            raise ValueError(
+                f"family='a': após o balanço 2:1 há {n} folhas contendo o "
+                f"corpo (esperado 1). Reduza radii[0] ou aumente H0.")
+    else:
+        dentro = [lf for lf in qt.leaves if _dentro_do_corpo(lf)]
+        area = sum((lf.x1 - lf.x0) * (lf.y1 - lf.y0) for lf in dentro)
+        if abs(area - D * D) > 1e-9 * D * D:
+            raise ValueError(
+                f"family='b': as folhas internas ao corpo cobrem área "
+                f"{area:.6g}, esperado {D*D:.6g}. O corpo não é união exata "
+                f"de folhas.")
+    return qt
+
+
 def _side_bbox(lf: Leaf, side: int) -> tuple:
     """Extensão física do lado inteiro de uma folha."""
     if side == SIDE_BOTTOM:
