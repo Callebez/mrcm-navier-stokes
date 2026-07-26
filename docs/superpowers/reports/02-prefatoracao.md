@@ -339,7 +339,9 @@ já esperado e explicado na seção 4.
 - **Data:** 2026-07-26 (mesmo dia, revisão de código imediatamente após a
   seção 1-9 acima).
 - **Commit antes do fix:** `bb96f8a`.
-- **Arquivos modificados:** `mprm/projector.py`, `tests/test_prefactorization.py`.
+- **Commit depois do fix:** `3422d41`.
+- **Arquivos modificados:** `mprm/projector.py`, `tests/test_prefactorization.py`,
+  `docs/superpowers/reports/02-prefatoracao.md` (este arquivo).
 
 ### 10.1 O que a revisão encontrou
 
