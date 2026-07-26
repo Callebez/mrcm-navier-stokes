@@ -6,6 +6,8 @@ Importa Firedrake (apenas dentro dos métodos — não no import do módulo).
 from __future__ import annotations
 import numpy as np
 import os, sys
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 
 MRCM_REPO = os.path.expanduser("~/mrcm/mrcm-firedrake")
 if MRCM_REPO not in sys.path:
@@ -18,12 +20,16 @@ from mrcm.interface_space import make_interface_space
 from mrcm.robin import make_robin
 from mrcm.local_form import build_local_form
 from mrcm.local_solver import LocalSolver, build_subdomain_workspace
-from mrcm.global_assembly import GlobalAssembler, compute_subdomain_triplets
+from mrcm.global_assembly import GlobalAssembler
 from mrcm.reconstructor import reconstruct_subdomain
 
 from mprm.problem import (SideBC, FlowProblem, _impermeable_problem,
                           _darcy_boundary_from_problem,
                           assert_solid_interior_to_subdomains)
+from mprm.triplets import subdomain_matrix_triplets, subdomain_rhs
+
+from mpi4py import MPI as _MPI
+MPI_SUM = _MPI.SUM
 
 # Projetor MRCM — estágio offline/online (Algoritmo 1 do artigo)
 # ===========================================================================
@@ -225,10 +231,59 @@ class MPrMProjector:
                 basis_per_sides=None, n_facets=None, dss=None, meshes=None,
                 Vs=None, Qs=None, face_mass={}, cofunc_flux={}, cofunc_pres={})
 
+        # ── Offline do sistema global de interface (spec §5, Fase 1) ──
+        # A_Γ depende só das MsBF/massas de face/cofunções: com K = δt e a
+        # geometria fixas, ela é a MESMA em todos os passos de tempo. Montar e
+        # fatorar aqui evita refazer, por passo, O(N_B²) produtos internos por
+        # subdomínio mais uma fatoração esparsa.
+        my_mat = {isub: subdomain_matrix_triplets(
+            cfg, self.skel, self.dofm, isub,
+            self.ws[isub]["homogeneous"], self.ws[isub]["face_mass"],
+            self.ws[isub]["cofunc_flux"], self.ws[isub]["cofunc_pres"])
+            for isub in self.my_subs}
+        gathered_mat = comm.gather(my_mat, root=0)
+
+        self.n_gamma = self.dofm.n_total
+        self.A_gamma = None
+        self.lu_gamma = None
+        if self.rank == 0:
+            parts = []
+            for d in gathered_mat:
+                parts.extend(d[k] for k in sorted(d.keys()))
+            nonempty = [t for t in parts if t[0].size > 0]
+            rows = np.concatenate([t[0] for t in nonempty])
+            cols = np.concatenate([t[1] for t in nonempty])
+            vals = np.concatenate([t[2] for t in nonempty])
+            A = sp.coo_matrix((vals, (rows, cols)),
+                              shape=(self.n_gamma, self.n_gamma)).tocsc()
+            A.sum_duplicates()
+            self.A_gamma = A
+            if cfg.global_solver == "iterative" and self.n_gamma > cfg.iterative_threshold:
+                self.lu_gamma = None      # caminho iterativo: resolve por passo
+            else:
+                self.lu_gamma = spla.splu(A)
+
         self.last_X = None
         self.last_pT = {}
         self.last_uT = {}
         self.last_boundary_fluxes = {}
+
+    # -- offline: sistema global de interface --------------------------------
+
+    def solve_interface(self, b):
+        """Resolve A_Γ X = b com a fatoração do offline (rank 0) e difunde X.
+
+        `b` é significativo apenas no rank 0; os demais podem passar None.
+        """
+        if self.rank == 0:
+            if self.lu_gamma is not None:
+                X = self.lu_gamma.solve(b)
+            else:
+                from mrcm.global_assembly import _solve_iterative
+                X = _solve_iterative(self.A_gamma, b, self.cfg)
+        else:
+            X = None
+        return self.comm.bcast(X, root=0)
 
     # -- online ------------------------------------------------------------
 
@@ -252,21 +307,17 @@ class MPrMProjector:
             self.src_fn[isub].dat.data[:] = divw[ic, jc]
             particular[isub] = self.solvers[isub].solve(self.L_forms[isub])
 
-        # 2. Triplets locais -> sistema global de interface no rank 0.
-        my_trip = {isub: compute_subdomain_triplets(
-            cfg, self.skel, self.dofm, isub,
-            particular[isub], self.ws[isub]["homogeneous"],
-            self.ws[isub]["face_mass"], self.ws[isub]["cofunc_flux"],
-            self.ws[isub]["cofunc_pres"]) for isub in self.my_subs}
-        gathered = comm.gather(my_trip, root=0)
-        if self.rank == 0:
-            trip = {}
-            for d in gathered:
-                trip.update(d)
-            _, _, X = self.assembler.assemble_from_triplets(trip)
-        else:
-            X = None
-        X = comm.bcast(X, root=0)
+        # 2. RHS local -> redução ao rank 0 -> solve com a LU do offline.
+        #    Só b muda de um passo para o outro (spec §5, Fase 1).
+        b_local = np.zeros(self.n_gamma, dtype=np.float64)
+        for isub in self.my_subs:
+            b_idx, b_vals = subdomain_rhs(
+                cfg, self.skel, self.dofm, isub, particular[isub],
+                self.ws[isub]["cofunc_flux"], self.ws[isub]["cofunc_pres"])
+            np.add.at(b_local, b_idx, b_vals)
+        b = np.zeros(self.n_gamma, dtype=np.float64) if self.rank == 0 else None
+        comm.Reduce(b_local, b, op=MPI_SUM, root=0)
+        X = self.solve_interface(b)
         self.last_X = X
 
         # 3. Reconstrução distribuída + traços de fluxo nas interfaces.
