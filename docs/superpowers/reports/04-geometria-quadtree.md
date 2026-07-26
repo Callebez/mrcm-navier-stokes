@@ -5,7 +5,9 @@
 - **Data:** 2026-07-26
 - **Commit antes:** `210c7b2` (`git rev-parse --short HEAD` antes de começar, na
   branch `feature/quadtree-mprm`)
-- **Commit depois:** `<preenchido no commit de follow-up>`
+- **Commit depois:** `87ecd37` (`git log --oneline -1` logo após o commit desta
+  tarefa; este relatório entrou nele, e o sha foi registrado aqui pelo commit
+  de follow-up seguinte, como nos relatórios 01-03)
 - **Arquivos criados:**
   - `docs/superpowers/reports/04-geometria-quadtree.md` (este arquivo)
 - **Arquivos modificados:**
