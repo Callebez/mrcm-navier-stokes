@@ -5,7 +5,8 @@
 - **Data:** 2026-07-26
 - **Commit antes:** `fc3727f` (`git rev-parse --short HEAD` antes de começar, na branch
   `feature/quadtree-mprm`)
-- **Commit depois:** ver seção 9 do plano / mensagem de commit abaixo (registrado após `git commit`)
+- **Commit depois:** `a43b511` (`git log --oneline -1` logo após o commit
+  desta tarefa)
 - **Arquivos criados:**
   - `mprm/decomposition.py`
   - `tests/test_decomposition.py`
