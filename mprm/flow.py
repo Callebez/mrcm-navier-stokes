@@ -160,7 +160,8 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
              eps_solid=1e-6, comm=None, verbose=True, log_every=200,
              frame_callback=None, frame_every=0, probes=None,
              obstacle_metrics=False, obstacle_metrics_every=1,
-             convective_order=2, limiter="minmod", U_ref=1.0, D=1.0):
+             convective_order=2, limiter="minmod", U_ref=1.0, D=1.0,
+             decomposition=None):
     """Laço temporal genérico do MPrM para um FlowProblem. Cavidade e von
     Kármán compartilham este caminho. Devolve dict(u,v,dt,nsteps,divmax,
     defect,t_wall[,cl_history,probe_history])."""
@@ -179,15 +180,20 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
     nsteps = int(np.ceil(T / dt))
 
     if method == "mprm":
+        t_off0 = time.perf_counter()
         cfg = MRCMConfig(Ndomx=Ndomx, Ndomy=Ndomy, nlocx=nloc, nlocy=nloc,
                          degreeU=degreeU, degreeP=degreeP, alpha=alpha,
                          basis_kind=basis_kind, Lx=problem.Lx, Ly=problem.Ly,
                          mixed_family="BDM", mixed_order=0,
-                         executor_kind="sequential")
+                         executor_kind="sequential",
+                         use_quadtree=(decomposition is not None
+                                       and not decomposition.is_uniform))
         projector = MPrMProjector(cfg, dt, comm=comm,
-                                  problem=problem, eps_solid=eps_solid)
+                                  problem=problem, eps_solid=eps_solid,
+                                  decomposition=decomposition)
         downscaler = MACDownscaler(cfg, dt, h=projector.decomp.hx,
                                     hy=projector.decomp.hy)
+        t_offline = time.perf_counter() - t_off0
     else:
         fine = ChannelFinePoisson(problem, dt)
         projector = None
@@ -242,10 +248,32 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
     out = {"u": u, "v": v, "dt": dt, "nsteps": nsteps, "N": Nx,
            "t_wall": t_wall, "divmax": divmax,
            "defect": (downscaler.last_defect if method == "mprm" else 0.0)}
+    if method == "mprm":
+        out["t_offline"] = t_offline
+        import numpy as _np
+        A = getattr(projector, "A_gamma", None)
+        if A is not None and A.shape[0] <= 4500:
+            try:
+                out["cond_A_gamma"] = float(_np.linalg.cond(A.toarray(), p=1))
+            except Exception:
+                out["cond_A_gamma"] = float("nan")
+        else:
+            out["cond_A_gamma"] = float("nan")
     if cl_hist:
         out["cl_history"] = np.array(cl_hist)     # colunas: t, Cd, Cl
     if probe_hist is not None:
         out["probe_history"] = np.array(probe_hist)
+    if method == "mprm":
+        d = projector.decomp
+        Hs = [lf.Hx for lf in d.leaves]
+        out["decomposition"] = {
+            "N_sub": len(d.leaves),
+            "n_gamma_edges": len(d.gamma_edges()),
+            "n_gamma_dofs": int(projector.dofm.n_total),
+            "H_min": float(min(Hs)), "H_max": float(max(Hs)),
+            "levels": sorted({lf.level for lf in d.leaves}),
+            "is_uniform": bool(d.is_uniform),
+        }
     return out
 
 
@@ -276,7 +304,8 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
                    eps_solid=1e-6,
                    comm=None, verbose=True, log_every=200,
                    probes=None, frame_callback=None, frame_every=0,
-                   obstacle_metrics_every=1, limiter="minmod"):
+                   obstacle_metrics_every=1, limiter="minmod",
+                   decomposition=None):
     """Escoamento em torno de um cilindro quadrado (von Kármán, artigo §3.5).
 
     Malha global Nx = Ndomx * nloc, Ny = Ndomy * nloc.
@@ -284,13 +313,22 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
     Exemplo canônico: Ndomx=10, Ndomy=5, nloc=30 → 300×150, h=0.053,
     obstáculo centrado em (4,4) com D=1 (cabe no subdomínio).
     """
-    assert Ndomx is not None and Ndomy is not None and nloc is not None, \
-        "Ndomx, Ndomy e nloc são obrigatórios"
-    Nx = Ndomx * nloc
-    Ny = Ndomy * nloc
-    problem = von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
-                                 inflow=inflow, walls=walls,
-                                 inflow_norm=inflow_norm)
+    if decomposition is not None:
+        # A decomposição já define Nx, Ny e o problema; Ndomx/Ndomy/nloc
+        # são usados apenas para o MRCMConfig (não afetam a malha).
+        Nx = decomposition.Nx
+        Ny = decomposition.Ny
+        problem = von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
+                                     inflow=inflow, walls=walls,
+                                     inflow_norm=inflow_norm)
+    else:
+        assert Ndomx is not None and Ndomy is not None and nloc is not None, \
+            "Ndomx, Ndomy e nloc são obrigatórios"
+        Nx = Ndomx * nloc
+        Ny = Ndomy * nloc
+        problem = von_karman_problem(Lx, Ly, Nx, Ny, D, xc, yc, U_in, Re,
+                                     inflow=inflow, walls=walls,
+                                     inflow_norm=inflow_norm)
     if T is None:
         T = 40.0 * D / U_in
     if probes is None:
@@ -302,7 +340,8 @@ def run_von_karman(Lx, Ly, D, xc, yc, U_in=1.0, Re=100.0,
                     obstacle_metrics=True, obstacle_metrics_every=obstacle_metrics_every,
                     convective_order=2, limiter=limiter,
                     U_ref=U_in, D=D,
-                    frame_callback=frame_callback, frame_every=frame_every)
+                    frame_callback=frame_callback, frame_every=frame_every,
+                    decomposition=decomposition)
 
 
 # ===========================================================================

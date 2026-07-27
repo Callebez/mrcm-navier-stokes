@@ -86,6 +86,11 @@ class MPrMProjector:
         if problem.solid is not None and self.decomp.is_uniform:
             assert_solid_interior_to_subdomains(problem.solid, cfg, strict=False)
 
+        # Cada rank constrói a árvore por conta própria; se um divergir, os
+        # triplets são montados contra numerações de Γ diferentes e o sistema
+        # global sai numericamente errado, sem erro nenhum.
+        self.decomp.assert_consistent_across_ranks(comm)
+
         dt_c = self.dt
         eps = self.eps_solid
         solid = problem.solid
