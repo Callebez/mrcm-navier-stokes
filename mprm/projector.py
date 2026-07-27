@@ -51,7 +51,8 @@ class MPrMProjector:
     """
 
     def __init__(self, cfg: MRCMConfig, dt: float, comm=None,
-                 problem=None, verbose=False, eps_solid=1e-6):
+                 problem=None, verbose=False, eps_solid=1e-6,
+                 decomposition=None):
         from firedrake import (Constant, FunctionSpace, TestFunction,
                                TestFunctions, Function, FacetNormal,
                                VectorFunctionSpace, SpatialCoordinate,
@@ -68,23 +69,28 @@ class MPrMProjector:
         self.verbose = verbose
         self.eps_solid = float(eps_solid)
 
+        # Decomposição: explícita (quadtree ou uniforme) ou derivada do cfg.
+        if decomposition is None:
+            from mprm.decomposition import Decomposition
+            decomposition = Decomposition.uniform(
+                cfg.Ndomx, cfg.Ndomy, cfg.nlocx, cfg.Lx, cfg.Ly)
+        self.decomp = decomposition
+        self.skel = decomposition.skeleton
+        self.dofm = DOFManager(self.skel.NGamma, cfg.ndofsU, cfg.ndofsP)
+        self.my_subs = list(range(self.rank, len(decomposition.leaves), self.size))
+
         # problem=None => cavidade impermeável (comportamento retrocompatível)
         if problem is None:
             problem = _impermeable_problem(cfg)
         self.problem = problem
-        if problem.solid is not None:
+        if problem.solid is not None and self.decomp.is_uniform:
             assert_solid_interior_to_subdomains(problem.solid, cfg, strict=False)
-
-        self.skel = Skeleton.cartesian(cfg.Ndomx, cfg.Ndomy)
-        self.dofm = DOFManager(self.skel.NGamma, cfg.ndofsU, cfg.ndofsP)
-        self.my_subs = list(range(self.rank, cfg.Nsubd, self.size))
 
         dt_c = self.dt
         eps = self.eps_solid
         solid = problem.solid
-        hx_f = cfg.Hx / cfg.nlocx
-        hy_f = cfg.Hy / cfg.nlocy
-        self.hx_f, self.hy_f = hx_f, hy_f
+        self.hx_f, self.hy_f = decomposition.hx, decomposition.hy
+        hx_f, hy_f = self.hx_f, self.hy_f   # aliases locais para as closures
 
         def _K(mesh):
             from firedrake import (Constant, Function, FunctionSpace,
@@ -123,8 +129,18 @@ class MPrMProjector:
             boundary=_darcy_boundary_from_problem(problem),
         )
 
-        robin = make_robin(cfg.robin_variant, cfg.alpha, *cfg.robin_L_xy(),
-                           cfg.robin_clamp_eps, cfg.robin_extreme_beta)
+        # Robin POR FOLHA: β = α L / K com o L característico daquela folha
+        # (Eq. 65). `build_subdomain_workspace` faz o mesmo internamente com
+        # `robin_L_xy_for`; usar aqui o L global faria o β do solver local
+        # divergir do β das MsBF em decomposições não uniformes (spec §2.6).
+        self.robin_L = {}
+        robins = {}
+        for lf in decomposition.leaves:
+            L_xy = cfg.robin_L_xy_for(lf.Hx, lf.Hy, lf.nlocx, lf.nlocy)
+            self.robin_L[lf.isub] = L_xy
+            robins[lf.isub] = make_robin(
+                cfg.robin_variant, cfg.alpha, *L_xy,
+                cfg.robin_clamp_eps, cfg.robin_extreme_beta)
         ispace = make_interface_space(cfg.basis_kind, cfg.degreeU, cfg.degreeP)
 
         NunkU = self.skel.NGamma * cfg.ndofsU
@@ -138,13 +154,12 @@ class MPrMProjector:
         self.uh = {}          # isub -> Function(V) para extração de traço
 
         for isub in self.my_subs:
-            ix, iy = isub % cfg.Ndomx, isub // cfg.Ndomx
-            flag_side, internal_sides = mark_sides(ix, iy, cfg.Ndomx, cfg.Ndomy)
-            edge_l = {s: int(self.skel.ieGt[self.skel.el2edge[isub, s]])
-                      for s in internal_sides}
-            task = {"cfg_dict": cfg.as_dict(), "isub": isub,
-                    "NunkU": NunkU, "edge_l": edge_l,
-                    "problem": self.problem_darcy}
+            lf = decomposition.leaf(isub)
+            internal_sides = sorted({s for s, _, _, _, _ in
+                                     decomposition.segments_of(isub)})
+            flag_side = np.zeros(4, dtype=bool)
+            flag_side[internal_sides] = True
+            task = decomposition.task(cfg, isub, NunkU, self.problem_darcy)
             # Offline: MsBF + caches B1/B2
             ws = build_subdomain_workspace(task)
             self.ws[isub] = ws
@@ -152,7 +167,7 @@ class MPrMProjector:
             W = V * Q
 
             # Solver local persistente (fatoração LU offline; artigo §2.7).
-            beta_expr = robin.beta_for_subdomain(isub, mesh)
+            beta_expr = robins[isub].beta_for_subdomain(isub, mesh)
             a_form, dx_m, ds_m, _, _, n_facet = build_local_form(
                 W, mesh, _invK(mesh), beta_expr, internal_sides,
                 quadrature_degree=cfg.final_quadrature_degree(),
@@ -226,8 +241,11 @@ class MPrMProjector:
         # Montador global
         self.assembler = None
         if self.rank == 0:
+            # `robins[0]` é usado apenas como placeholder: o MPrM monta o
+            # sistema por triplas (assemble_from_triplets), caminho que não
+            # consulta o Robin do assembler.
             self.assembler = GlobalAssembler(
-                cfg, self.skel, self.dofm, ispace, robin,
+                cfg, self.skel, self.dofm, ispace, robins[0],
                 basis_per_sides=None, n_facets=None, dss=None, meshes=None,
                 Vs=None, Qs=None, face_mass={}, cofunc_flux={}, cofunc_pres={})
 

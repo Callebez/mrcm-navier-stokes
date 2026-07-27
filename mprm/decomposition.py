@@ -59,36 +59,42 @@ class GammaEdge:
 class Decomposition:
     """Folhas + esqueleto + arestas de Γ, para um `h` uniforme global."""
 
-    def __init__(self, skeleton, leaves, h, Lx, Ly):
+    def __init__(self, skeleton, leaves, h, Lx, Ly, *, hy=None):
         self.skeleton = skeleton
         self.leaves = list(leaves)
-        self.h = float(h)
+        self.hx = float(h)
+        self.hy = float(hy) if hy is not None else float(h)
         self.Lx, self.Ly = float(Lx), float(Ly)
-        self.Nx = int(round(Lx / h))
-        self.Ny = int(round(Ly / h))
+        self.Nx = int(round(Lx / self.hx))
+        self.Ny = int(round(Ly / self.hy))
         self._by_id = {lf.isub: lf for lf in self.leaves}
         self._gamma = None          # construído sob demanda
+
+    @property
+    def h(self) -> float:
+        """Espaçamento de malha (atalho para hx; no quadtree hx == hy)."""
+        return self.hx
 
     # ── fábricas ────────────────────────────────────────────────────────
     @classmethod
     def uniform(cls, Ndomx: int, Ndomy: int, nloc: int,
-                Lx: float, Ly: float) -> "Decomposition":
+                Lx: float, Ly: float, *, nlocy: int = None) -> "Decomposition":
         """Decomposição cartesiana — o caminho retrocompatível."""
+        if nlocy is None:
+            nlocy = nloc
         Hx, Hy = Lx / Ndomx, Ly / Ndomy
-        h = Hx / nloc
-        if abs(Hy / nloc - h) > 1e-12 * h:
-            raise ValueError(
-                f"células não quadradas: Hx/nloc={h:.6g} != Hy/nloc="
-                f"{Hy/nloc:.6g}. Ajuste Ndomx/Ndomy para hx == hy.")
+        hx = Hx / nloc
+        hy = Hy / nlocy
         leaves = []
         for isub in range(Ndomx * Ndomy):
             ix, iy = isub % Ndomx, isub // Ndomx
             leaves.append(Leaf(isub=isub,
                                x0=ix * Hx, y0=iy * Hy,
                                x1=(ix + 1) * Hx, y1=(iy + 1) * Hy,
-                               nlocx=nloc, nlocy=nloc,
-                               i0=ix * nloc, j0=iy * nloc, level=0))
-        return cls(Skeleton.cartesian(Ndomx, Ndomy), leaves, h, Lx, Ly)
+                               nlocx=nloc, nlocy=nlocy,
+                               i0=ix * nloc, j0=iy * nlocy, level=0))
+        kw = {} if abs(hx - hy) <= 1e-12 * max(hx, hy) else {"hy": hy}
+        return cls(Skeleton.cartesian(Ndomx, Ndomy), leaves, hx, Lx, Ly, **kw)
 
     @classmethod
     def from_quadtree(cls, qt, h: float, Lx: float, Ly: float,
@@ -203,7 +209,8 @@ class Decomposition:
             bbox = inc.bbox if inc.bbox is not None else _side_bbox(lf, inc.side)
             horiz = inc.side in (SIDE_BOTTOM, SIDE_TOP)
             span = (bbox[2] - bbox[0]) if horiz else (bbox[3] - bbox[1])
-            nfaces = int(round(span / self.h))
+            dh = self.hx if horiz else self.hy
+            nfaces = int(round(span / dh))
             out.append((inc.side, inc.seg, inc.ell, bbox, nfaces))
         return out
 
