@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from mrcm.config import MRCMConfig
-from mprm_core import MACDownscaler
+from mprm.downscaler import MACDownscaler
 
 
 def _cfg(n=8):
@@ -19,7 +19,7 @@ def test_sem_solido_reproduz_comportamento_atual():
     rng = np.random.default_rng(0)
     divw = rng.standard_normal((8, 8)); divw -= divw.mean()
     z = np.zeros(8)
-    vt1, vt2 = ds.solve_patch(divw, z, z, z, z)          # sem solid_loc
+    vt1, vt2, _ = ds.solve_patch(divw, z, z, z, z)          # sem solid_loc
     # conservação: div(vt) == divw (Neumann puro, RHS balanceado)
     dv = (vt1[1:, :] - vt1[:-1, :]) / ds.hx + (vt2[:, 1:] - vt2[:, :-1]) / ds.hy
     assert np.allclose(dv, divw, atol=1e-9)
@@ -36,7 +36,7 @@ def test_solido_zera_faces_e_conserva_no_fluido():
     # Compatibiliza o RHS (Neumann puro): soma sobre fluido deve ser 0
     divw[~solid] -= divw[~solid].mean()
     z = np.zeros(8)
-    vt1, vt2 = ds.solve_patch(divw, z, z, z, z, solid_loc=solid)
+    vt1, vt2, _ = ds.solve_patch(divw, z, z, z, z, solid_loc=solid)
     # faces sólidas: vt·n = 0
     fx = np.zeros((9, 8), bool); fx[:-1, :] |= solid; fx[1:, :] |= solid
     fy = np.zeros((8, 9), bool); fy[:, :-1] |= solid; fy[:, 1:] |= solid

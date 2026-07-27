@@ -45,6 +45,7 @@ def mprm_projection_step(w1, w2, projector: "MPrMProjector",
 
     u = w1.copy(); v = w2.copy()
     my_patch = {}
+    my_defects = {}
     for isub in projector.my_subs:
         lf = decomp.leaf(isub)
         ox, oy = lf.i0, lf.j0
@@ -63,9 +64,10 @@ def mprm_projection_step(w1, w2, projector: "MPrMProjector",
         if solid is not None:
             sl = solid[ox:ox + n_i, oy:oy + m_i]
             solid_loc = sl if sl.any() else None
-        vt1, vt2 = downscaler.solve_patch(
+        vt1, vt2, defect = downscaler.solve_patch(
             divw[ox:ox + n_i, oy:oy + m_i], fW, fE, fS, fN, solid_loc=solid_loc)
         my_patch[isub] = (vt1, vt2)
+        my_defects[isub] = defect
 
     for d in comm.allgather(my_patch):
         for isub, (vt1, vt2) in d.items():
@@ -74,6 +76,12 @@ def mprm_projection_step(w1, w2, projector: "MPrMProjector",
             n_i, m_i = lf.nlocx, lf.nlocy
             u[ox:ox + n_i + 1, oy:oy + m_i] = w1[ox:ox + n_i + 1, oy:oy + m_i] - vt1
             v[ox:ox + n_i, oy:oy + m_i + 1] = w2[ox:ox + n_i, oy:oy + m_i + 1] - vt2
+
+    # Reúne defeitos por folha (diagnóstico para laço temporal).
+    all_defects = {}
+    for d in comm.allgather(my_defects):
+        all_defects.update(d)
+    projector.last_defects = all_defects
 
     # contorno externo por lado (impermeável => 0; saída/entrada preservam w*)
     _apply_external_normals_after_step(u, v, problem)
@@ -178,7 +186,8 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
                          executor_kind="sequential")
         projector = MPrMProjector(cfg, dt, comm=comm,
                                   problem=problem, eps_solid=eps_solid)
-        downscaler = MACDownscaler(cfg, dt)
+        downscaler = MACDownscaler(cfg, dt, h=projector.decomp.hx,
+                                    hy=projector.decomp.hy)
     else:
         fine = ChannelFinePoisson(problem, dt)
         projector = None
