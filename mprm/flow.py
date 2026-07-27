@@ -29,10 +29,11 @@ def mprm_projection_step(w1, w2, projector: "MPrMProjector",
                          downscaler: "MACDownscaler"):
     """Passos 2-4 do MPrM. Lê `projector.problem` (obstáculo + saída).
     Assinatura inalterada — retrocompatível."""
+    from mprm.decomposition import leaf_boundary_fluxes
     cfg = projector.cfg
     comm = projector.comm
     problem = projector.problem
-    n, m = cfg.nlocx, cfg.nlocy
+    decomp = projector.decomp
     hx, hy = downscaler.hx, downscaler.hy
     solid = problem.solid
 
@@ -43,15 +44,12 @@ def mprm_projection_step(w1, w2, projector: "MPrMProjector",
     out_fluxes = getattr(projector, "last_boundary_fluxes", {})
 
     u = w1.copy(); v = w2.copy()
-    zeros_m, zeros_n = np.zeros(m), np.zeros(n)
     my_patch = {}
     for isub in projector.my_subs:
-        ix, iy = isub % cfg.Ndomx, isub // cfg.Ndomx
-        ox, oy = ix * n, iy * m
-        fW = fluxes.get(("v", ix, iy), zeros_m)
-        fE = fluxes.get(("v", ix + 1, iy), zeros_m)
-        fS = fluxes.get(("h", ix, iy), zeros_n)
-        fN = fluxes.get(("h", ix, iy + 1), zeros_n)
+        lf = decomp.leaf(isub)
+        ox, oy = lf.i0, lf.j0
+        n_i, m_i = lf.nlocx, lf.nlocy
+        fS, fE, fN, fW = leaf_boundary_fluxes(decomp, fluxes, isub)
         # fluxos externos de SAÍDA (v·n reconstruído nas faces outflow)
         if (isub, "right") in out_fluxes:
             fE = out_fluxes[(isub, "right")]
@@ -63,18 +61,19 @@ def mprm_projection_step(w1, w2, projector: "MPrMProjector",
             fS = out_fluxes[(isub, "bottom")]
         solid_loc = None
         if solid is not None:
-            sl = solid[ox:ox + n, oy:oy + m]
+            sl = solid[ox:ox + n_i, oy:oy + m_i]
             solid_loc = sl if sl.any() else None
         vt1, vt2 = downscaler.solve_patch(
-            divw[ox:ox + n, oy:oy + m], fW, fE, fS, fN, solid_loc=solid_loc)
+            divw[ox:ox + n_i, oy:oy + m_i], fW, fE, fS, fN, solid_loc=solid_loc)
         my_patch[isub] = (vt1, vt2)
 
     for d in comm.allgather(my_patch):
         for isub, (vt1, vt2) in d.items():
-            ix, iy = isub % cfg.Ndomx, isub // cfg.Ndomx
-            ox, oy = ix * n, iy * m
-            u[ox:ox + n + 1, oy:oy + m] = w1[ox:ox + n + 1, oy:oy + m] - vt1
-            v[ox:ox + n, oy:oy + m + 1] = w2[ox:ox + n, oy:oy + m + 1] - vt2
+            lf = decomp.leaf(isub)
+            ox, oy = lf.i0, lf.j0
+            n_i, m_i = lf.nlocx, lf.nlocy
+            u[ox:ox + n_i + 1, oy:oy + m_i] = w1[ox:ox + n_i + 1, oy:oy + m_i] - vt1
+            v[ox:ox + n_i, oy:oy + m_i + 1] = w2[ox:ox + n_i, oy:oy + m_i + 1] - vt2
 
     # contorno externo por lado (impermeável => 0; saída/entrada preservam w*)
     _apply_external_normals_after_step(u, v, problem)

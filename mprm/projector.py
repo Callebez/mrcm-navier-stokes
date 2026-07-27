@@ -195,23 +195,36 @@ class MPrMProjector:
             self.cell_map[isub] = (np.clip(ic, 0, cfg.Nglobx - 1),
                                    np.clip(jc, 0, cfg.Ngloby - 1))
 
-            # Operadores de traço: fluxo médio por face fina de cada lado interno.
+            # Operadores de traço: fluxo médio por face fina de cada SEGMENTO.
+            # Os dois segmentos de um lado compartilham o mesmo marcador `ds`,
+            # então a separação é pela bbox do segmento.
             T = FunctionSpace(mesh, "HDiv Trace", 0)
             tau = TestFunction(T)
             uh = Function(V)
             self.uh[isub] = uh
-            for s in internal_sides:
-                marker = SIDE_TO_MARKER[s]
+            for side, seg, ell, bbox, nfaces in decomposition.segments_of(isub):
+                marker = SIDE_TO_MARKER[side]
                 ln = assemble(tau * ds_m(marker)).dat.data_ro.copy()
                 idx = np.nonzero(np.abs(ln) > 1e-14)[0]
                 xm = assemble(SpatialCoordinate(mesh)[0] * tau
                               * ds_m(marker)).dat.data_ro[idx] / ln[idx]
                 ym = assemble(SpatialCoordinate(mesh)[1] * tau
                               * ds_m(marker)).dat.data_ro[idx] / ln[idx]
-                coord = ym if s in (1, 3) else xm     # lados verticais: y
+                horiz = side in (0, 2)
+                coord = xm if horiz else ym
+                lo = bbox[0] if horiz else bbox[1]
+                hi = bbox[2] if horiz else bbox[3]
+                keep = (coord >= lo - 0.25 * self.hx_f) & \
+                       (coord <= hi + 0.25 * self.hx_f)
+                idx, coord = idx[keep], coord[keep]
+                if idx.size != nfaces:
+                    raise ValueError(
+                        f"folha {isub} lado {side} seg {seg}: {idx.size} faces "
+                        f"finas no segmento, esperado {nfaces}. Alinhamento de "
+                        f"segmento ou h inconsistente.")
                 order = np.argsort(coord)
-                sign = +1.0 if s in (1, 2) else -1.0  # right/top: n = +e
-                self.trace[(isub, s)] = {
+                sign = +1.0 if side in (1, 2) else -1.0   # right/top: n = +e
+                self.trace[(isub, side, seg)] = {
                     "form": dot(uh, n_facet) * tau * ds_m(marker),
                     "idx": idx, "len": ln[idx], "order": order, "sign": sign,
                 }
@@ -362,30 +375,26 @@ class MPrMProjector:
                 sparsity_cutoff=cfg.reconstruction_sparsity_cutoff)
             self.last_pT[isub], self.last_uT[isub] = pT, uT
             self.uh[isub].assign(uT)
-            for (jsub, s), tr in self.trace.items():
+            for (jsub, side, seg), tr in self.trace.items():
                 if jsub != isub:
                     continue
                 vals = assemble(tr["form"]).dat.data_ro[tr["idx"]]
-                flux = tr["sign"] * (vals / tr["len"])[tr["order"]]
-                my_traces[(isub, s)] = flux
+                my_traces[(isub, side, seg)] = \
+                    tr["sign"] * (vals / tr["len"])[tr["order"]]
 
-        # 4. Média dos fluxos (Eq. 21) — allgather (arrays pequenos: nloc
-        #    valores por lado de interface).
+        # 4. Média dos fluxos por aresta de Γ (Eq. 21). Com h uniforme os dois
+        #    lados têm o mesmo número de faces finas, então é média face a face
+        #    — inclusive nas arestas com nó pendurado.
         all_tr = {}
         for d in comm.allgather(my_traces):
             all_tr.update(d)
+        self.raw_traces = all_tr
 
         fluxes = {}
-        for iy in range(cfg.Ndomy):          # interfaces verticais
-            for i in range(1, cfg.Ndomx):
-                sl = (i - 1) + iy * cfg.Ndomx   # subdomínio à esquerda
-                sr = i + iy * cfg.Ndomx
-                fluxes[("v", i, iy)] = 0.5 * (all_tr[(sl, 1)] + all_tr[(sr, 3)])
-        for j in range(1, cfg.Ndomy):        # interfaces horizontais
-            for ix in range(cfg.Ndomx):
-                sb = ix + (j - 1) * cfg.Ndomx   # subdomínio abaixo
-                st = ix + j * cfg.Ndomx
-                fluxes[("h", ix, j)] = 0.5 * (all_tr[(sb, 2)] + all_tr[(st, 0)])
+        for e in self.decomp.gamma_edges():
+            media = 0.5 * (all_tr[e.a] + all_tr[e.b])
+            fluxes[e.a] = media
+            fluxes[e.b] = media
 
         # fluxos de saída (v·n reconstruído nas faces externas outflow)
         my_out = {}

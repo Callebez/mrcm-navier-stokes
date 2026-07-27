@@ -505,3 +505,37 @@ def _side_bbox(lf: Leaf, side: int) -> tuple:
     if side == SIDE_LEFT:
         return (lf.x0, lf.y0, lf.x0, lf.y1)
     return (lf.x1, lf.y0, lf.x1, lf.y1)         # SIDE_RIGHT
+
+
+def leaf_boundary_fluxes(decomp: "Decomposition", flux_avg: dict, isub: int):
+    """Fluxos dos 4 lados da folha, montados a partir dos segmentos de Γ.
+
+    Sob quadtree um lado pode ter dois segmentos, cada um confrontando uma
+    folha vizinha diferente. Como h é uniforme, cada segmento cobre um bloco
+    contíguo e exato de faces finas do lado, e a montagem é concatenação — sem
+    interpolação nem restrição.
+
+    Returns
+    -------
+    (fS, fE, fN, fW) : arrays de tamanho (nlocx, nlocy, nlocx, nlocy).
+        Orientação: fS/fN em +y, fW/fE em +x — a mesma que
+        `MACDownscaler.solve_patch` espera.
+    """
+    lf = decomp.leaf(isub)
+    f = {0: np.zeros(lf.nlocx), 1: np.zeros(lf.nlocy),
+         2: np.zeros(lf.nlocx), 3: np.zeros(lf.nlocy)}
+    for side, seg, ell, bbox, nfaces in decomp.segments_of(isub):
+        val = flux_avg.get((isub, side, seg))
+        if val is None:                       # lado externo: ṽ·n = 0
+            continue
+        horiz = side in (0, 2)
+        origin = lf.x0 if horiz else lf.y0
+        start = bbox[0] if horiz else bbox[1]
+        dh = decomp.hx if horiz else decomp.hy
+        off = int(round((start - origin) / dh))
+        if off < 0 or off + val.size > f[side].size:
+            raise ValueError(
+                f"folha {isub} lado {side} seg {seg}: offset {off} + "
+                f"{val.size} faces excede o lado ({f[side].size}).")
+        f[side][off:off + val.size] = val
+    return f[0], f[1], f[2], f[3]
