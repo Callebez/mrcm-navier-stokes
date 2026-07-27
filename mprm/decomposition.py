@@ -90,6 +90,98 @@ class Decomposition:
                                i0=ix * nloc, j0=iy * nloc, level=0))
         return cls(Skeleton.cartesian(Ndomx, Ndomy), leaves, h, Lx, Ly)
 
+    @classmethod
+    def from_quadtree(cls, qt, h: float, Lx: float, Ly: float,
+                      solid=None) -> "Decomposition":
+        """Decomposição a partir de uma árvore balanceada, com h uniforme.
+
+        Cada folha recebe ``nloc_i = H_i/h`` (decisão D1), gravado em
+        ``skeleton.sub_nloc``, que é o canal pelo qual o mrcm leva a resolução
+        até a malha local (`mrcm/solver.py:120-136`).
+
+        ``solid``, quando dado, é a máscara MAC global; a conexidade do fluido
+        em cada folha é verificada na construção (spec §4.5).
+        """
+        leaves_qt = qt.leaves            # já ordenadas row-major, com id
+        skel = Skeleton.from_quadtree(qt)   # valida o balanço 2:1 internamente
+
+        leaves = []
+        sub_nloc = np.zeros((len(leaves_qt), 2), dtype=int)
+        for nd in leaves_qt:
+            isub = nd.subdomain_id
+            nlocx = int(round((nd.x1 - nd.x0) / h))
+            nlocy = int(round((nd.y1 - nd.y0) / h))
+            for nome, nl, H in (("nlocx", nlocx, nd.x1 - nd.x0),
+                                ("nlocy", nlocy, nd.y1 - nd.y0)):
+                if abs(H / h - nl) > 1e-9 * max(nl, 1):
+                    raise ValueError(
+                        f"folha {isub}: {nome} = {H:.6g}/{h:.6g} não é inteiro. "
+                        f"h precisa dividir todo H_ℓ (spec §4.3).")
+            sub_nloc[isub] = (nlocx, nlocy)
+            leaves.append(Leaf(isub=isub, x0=nd.x0, y0=nd.y0,
+                               x1=nd.x1, y1=nd.y1,
+                               nlocx=nlocx, nlocy=nlocy,
+                               i0=int(round(nd.x0 / h)),
+                               j0=int(round(nd.y0 / h)),
+                               level=nd.level))
+        skel.sub_nloc = sub_nloc
+        d = cls(skel, leaves, h, Lx, Ly)
+        if solid is not None:
+            d.check_fluid_connectivity(solid)
+        return d
+
+    # ── invariantes ─────────────────────────────────────────────────────
+    def check_fluid_connectivity(self, solid) -> None:
+        """Nenhuma folha pode ter região fluida desconexa (spec §4.5).
+
+        O problema local do downscaler é Neumann puro: com fluido em duas
+        componentes a nulidade é 2, e o pino numa única célula remove apenas um
+        modo — a projeção sairia errada sem erro nenhum. Folhas 100% sólidas
+        são válidas (a família (b) as produz por construção).
+        """
+        from scipy.ndimage import label
+        for lf in self.leaves:
+            blk = solid[lf.i0:lf.i0 + lf.nlocx, lf.j0:lf.j0 + lf.nlocy]
+            fluid = ~np.asarray(blk, dtype=bool)
+            if not fluid.any():
+                continue                       # folha 100% sólida: ok
+            ncomp = int(label(fluid)[1])
+            if ncomp > 1:
+                raise ValueError(
+                    f"folha {lf.isub} (células x[{lf.i0}:{lf.i0+lf.nlocx}], "
+                    f"y[{lf.j0}:{lf.j0+lf.nlocy}]) tem região fluida desconexa "
+                    f"({ncomp} componentes). O problema de Neumann local teria "
+                    f"nulidade {ncomp} e o pino remove só um modo.")
+
+    def assert_consistent_across_ranks(self, comm) -> None:
+        """Todos os ranks precisam ter construído o MESMO esqueleto.
+
+        Cada rank constrói a árvore por conta própria. É determinístico, mas se
+        um rank divergir, os triplets são montados contra numerações de Γ
+        diferentes e o sistema global sai numericamente lixo, sem erro.
+
+        Usa zlib.crc32 em vez de hash() porque PYTHONHASHSEED randomiza o hash
+        de str/bytes por processo — hash() difere entre ranks MPI mesmo para
+        esqueletos idênticos (pre-flight item 2; ver mrcm/solver.py:339).
+        """
+        if getattr(comm, "size", 1) == 1:
+            return
+        import zlib
+        from mpi4py import MPI as _MPI
+        skel = self.skeleton
+        raw = (skel.NGamma.to_bytes(4, "little") +
+               len(self.leaves).to_bytes(4, "little") +
+               np.ascontiguousarray(skel.el2edge).tobytes() +
+               np.ascontiguousarray(skel.edge2el).tobytes())
+        fingerprint = zlib.crc32(raw)
+        lo = comm.allreduce(fingerprint, op=_MPI.MIN)
+        hi = comm.allreduce(fingerprint, op=_MPI.MAX)
+        if lo != hi:
+            raise RuntimeError(
+                f"esqueletos divergem entre ranks (rank {comm.rank}: "
+                f"NGamma={skel.NGamma}, {len(self.leaves)} folhas). "
+                f"A montagem global seria feita contra numerações diferentes.")
+
     # ── acesso ──────────────────────────────────────────────────────────
     @property
     def is_uniform(self) -> bool:

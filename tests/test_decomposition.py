@@ -219,3 +219,115 @@ class TestObstacleTree:
             for s in range(4):
                 for nb in lf.neighbours[s]:
                     assert abs(lf.level - nb.level) <= 1
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Decomposition.from_quadtree (spec §4.2, §4.5, Fase 2)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _arvore_uniforme(n, L=1.0):
+    """Árvore com n×n folhas todas no mesmo nível, sem refino."""
+    from mrcm.quadtree import QuadTree, QuadTreeNode
+    H = L / n
+    root = QuadTreeNode(0.0, 0.0, L, L, 0)
+    root.children = [QuadTreeNode(i * H, j * H, (i + 1) * H, (j + 1) * H, 0)
+                     for j in range(n) for i in range(n)]
+    qt = QuadTree(root=root, max_level=0, Lx=L, Ly=L)
+    qt._build_neighbours()
+    return qt
+
+
+class TestFromQuadtree:
+    def test_arvore_uniforme_equivale_a_decomposicao_cartesiana(self):
+        """A rede de segurança: mesmo domínio, mesmas folhas, mesmas arestas."""
+        nloc = 8
+        du = Decomposition.uniform(2, 2, nloc, 1.0, 1.0)
+        dq = Decomposition.from_quadtree(_arvore_uniforme(2), h=du.h,
+                                         Lx=1.0, Ly=1.0)
+        assert len(dq.leaves) == len(du.leaves)
+        for isub in range(4):
+            a, b = du.leaf(isub), dq.leaf(isub)
+            assert (a.x0, a.y0, a.x1, a.y1) == pytest.approx((b.x0, b.y0, b.x1, b.y1))
+            assert (a.i0, a.j0) == (b.i0, b.j0)
+            assert (a.nlocx, a.nlocy) == (b.nlocx, b.nlocy)
+        pares_u = {(frozenset([e.a[0], e.b[0]]), e.nfaces) for e in du.gamma_edges()}
+        pares_q = {(frozenset([e.a[0], e.b[0]]), e.nfaces) for e in dq.gamma_edges()}
+        assert pares_u == pares_q
+
+    def test_nloc_proporcional_ao_tamanho_da_folha(self):
+        """h uniforme (decisão D1): folha maior recebe mais células."""
+        from mrcm.quadtree import QuadTree
+        qt = _arvore_uniforme(2)
+        qt.leaves[0].subdivide()           # folha 0 vira 4 folhas de meio tamanho
+        qt._invalidate_cache()
+        qt.balance_2to1()
+        h = 0.5 / 8
+        d = Decomposition.from_quadtree(qt, h=h, Lx=1.0, Ly=1.0)
+        for lf in d.leaves:
+            assert lf.nlocx == int(round(lf.Hx / h))
+            assert lf.nlocy == int(round(lf.Hy / h))
+        nlocs = sorted({lf.nlocx for lf in d.leaves})
+        assert nlocs == [4, 8], f"esperados dois tamanhos de folha, obtido {nlocs}"
+        assert d.skeleton.sub_nloc is not None
+        assert d.skeleton.sub_nloc.shape == (len(d.leaves), 2)
+
+    def test_nloc_heterogeneo_chega_a_malha_local(self):
+        """O elo que nunca foi exercitado (spec §4.6): sub_nloc -> malha real.
+
+        `build_subdomain_workspace` deve gerar, para cada folha, uma malha com
+        2·nlocx·nlocy células (RectangleMesh com diagonal='left').
+        """
+        from mrcm.config import MRCMConfig
+        from mrcm.local_solver import build_subdomain_workspace
+        from mprm.problem import _impermeable_problem, _darcy_boundary_from_problem
+        from mrcm.problem import DarcyProblem
+        from firedrake import Constant
+
+        qt = _arvore_uniforme(2)
+        qt.leaves[0].subdivide()
+        qt._invalidate_cache()
+        qt.balance_2to1()
+        h = 0.5 / 8
+        d = Decomposition.from_quadtree(qt, h=h, Lx=1.0, Ly=1.0)
+
+        cfg = MRCMConfig(Ndomx=2, Ndomy=2, nlocx=8, nlocy=8,
+                         degreeU=1, degreeP=1, alpha=1.0,
+                         basis_kind="legendre_P", mixed_family="BDM",
+                         mixed_order=0, executor_kind="sequential",
+                         use_quadtree=True)
+        flow = _impermeable_problem(cfg)
+        darcy = DarcyProblem(
+            Lx=1.0, Ly=1.0,
+            permeability=lambda mesh: Constant(1.0),
+            inv_permeability=lambda mesh: Constant(1.0),
+            source=lambda x, y: Constant(0.0),
+            boundary=_darcy_boundary_from_problem(flow))
+        NunkU = d.skeleton.NGamma * cfg.ndofsU
+        for isub in (0, len(d.leaves) - 1):
+            lf = d.leaf(isub)
+            ws = build_subdomain_workspace(d.task(cfg, isub, NunkU, darcy))
+            n_esperado = 2 * lf.nlocx * lf.nlocy
+            assert ws["mesh"].num_cells() == n_esperado, (
+                f"folha {isub}: malha com {ws['mesh'].num_cells()} células, "
+                f"esperado {n_esperado} para nloc=({lf.nlocx},{lf.nlocy})")
+
+    def test_fluido_desconexo_e_rejeitado(self):
+        """Neumann puro com fluido em 2 componentes tem nulidade 2 (spec §4.5)."""
+        d = Decomposition.uniform(2, 2, nloc=8, Lx=1.0, Ly=1.0)
+        solid = np.zeros((16, 16), dtype=bool)
+        solid[0:8, 4] = True          # faixa cortando a folha 0 de lado a lado
+        with pytest.raises(ValueError, match="desconex"):
+            d.check_fluid_connectivity(solid)
+
+    def test_fluido_conexo_e_aceito(self):
+        d = Decomposition.uniform(2, 2, nloc=8, Lx=1.0, Ly=1.0)
+        solid = np.zeros((16, 16), dtype=bool)
+        solid[2:5, 2:5] = True        # bloco interno: fluido em anel, conexo
+        d.check_fluid_connectivity(solid)     # não levanta
+
+    def test_folha_totalmente_solida_e_aceita(self):
+        """Na família (b) o corpo é união de folhas — 100% sólidas são válidas."""
+        d = Decomposition.uniform(2, 2, nloc=8, Lx=1.0, Ly=1.0)
+        solid = np.zeros((16, 16), dtype=bool)
+        solid[0:8, 0:8] = True        # folha 0 inteira
+        d.check_fluid_connectivity(solid)     # não levanta
