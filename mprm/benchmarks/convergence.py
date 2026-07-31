@@ -30,19 +30,36 @@ def _make_meta(study: str, comm, **fields) -> dict:
     return meta
 
 
-def _rel_err(a1, a2, b1, b2) -> float:
-    """‖(a1,a2) − (b1,b2)‖₂ / ‖(b1,b2)‖₂."""
+def _rel_err(a1, a2, b1, b2) -> float | None:
+    """‖(a1,a2) − (b1,b2)‖₂ / ‖(b1,b2)‖₂.
+
+    Devolve None quando a referência é identicamente nula — o caso do modo
+    "gradient", em que a parcela solenoidal exata é zero e o erro relativo
+    não tem denominador. Use err_abs/leak_ratio nesse modo.
+    """
     num = np.sum((a1 - b1) ** 2) + np.sum((a2 - b2) ** 2)
     den = np.sum(b1 ** 2) + np.sum(b2 ** 2)
+    if den == 0.0:
+        return None
     return float(np.sqrt(num / den))
+
+
+def _fmt(x, spec=".4e") -> str:
+    """Formata métrica que pode ser None (modo gradient)."""
+    return "    None  " if x is None else format(x, spec)
 
 
 def _fit_rate(cases: list[dict], x_key: str, err_key: str,
               verbose: bool = True) -> dict | None:
-    """Regressão log-log de err_key vs x_key."""
-    if len(cases) < 2:
+    """Regressão log-log de err_key vs x_key.
+
+    Pontos com valor None são ignorados: no modo "gradient" err_vs_exact não
+    existe, e a curva ausente não pode derrubar as demais.
+    """
+    ordered = [c for c in sorted(cases, key=lambda c: -c[x_key])
+               if c.get(err_key) is not None]
+    if len(ordered) < 2:
         return None
-    ordered = sorted(cases, key=lambda c: -c[x_key])
     xs = [c[x_key] for c in ordered]
     errs = [c[err_key] for c in ordered]
     rate = compute_convergence_rate(xs, errs)
@@ -55,9 +72,18 @@ def _fit_rate(cases: list[dict], x_key: str, err_key: str,
 
 
 def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
-                      basis_kind, dt, include_raw_mrcm=False) -> dict:
-    """Um nível Hh: monta offline, projeta, mede erro."""
-    from mprm.benchmarks.hh import hh_build_w
+                      basis_kind, dt, include_raw_mrcm=False,
+                      mode="mixed") -> dict:
+    """Um nível Hh: monta offline, projeta, mede erro.
+
+    `mode` seleciona o subespaço da entrada (ver hh_build_w_mode). O default
+    "mixed" reproduz exatamente o comportamento anterior.
+
+    Não delega a hh_benchmark_mode porque também precisa da referência em
+    malha fina (FineProjector) para err_vs_fine, que aquela função não
+    calcula; delegar custaria a coluna ou um segundo solve fino.
+    """
+    from mprm.benchmarks.hh import hh_build_w_mode, _l2_mac
     from mprm.projector import MPrMProjector
     from mprm.downscaler import MACDownscaler
     from mprm.flow import mprm_projection_step, FineProjector
@@ -67,7 +93,7 @@ def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
     h = 1.0 / N
     H = 1.0 / Ndom
 
-    w1, w2, u1, u2 = hh_build_w(N)
+    w1, w2, u1, u2 = hh_build_w_mode(N, mode=mode)
 
     fine = FineProjector(N, N, h, h, dt)
     uf1, uf2 = fine.step(w1, w2)
@@ -83,11 +109,20 @@ def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
     uh1, uh2 = mprm_projection_step(w1, w2, projector, downscaler)
     wall = time.perf_counter() - t0
 
+    err_abs = _l2_mac(uh1 - u1, uh2 - u2, h)
+    wnorm = _l2_mac(w1, w2, h)
+
     case = {
         "Ndom": Ndom, "H": float(H), "h": float(h), "N": N,
+        "mode": mode,
         "err_vs_exact": _rel_err(uh1, uh2, u1, u2),
         "err_vs_fine": _rel_err(uh1, uh2, uf1, uf2),
         "err_fine_vs_exact": _rel_err(uf1, uf2, u1, u2),
+        "err_abs": err_abs,
+        # fração da energia da ENTRADA que aparece como erro: a única
+        # métrica comparável entre os três modos, porque no modo gradient
+        # o denominador de err_vs_exact não existe
+        "leak_ratio": None if wnorm == 0.0 else err_abs / wnorm,
         "divmax": float(np.abs(mac_divergence(uh1, uh2, h, h)).max()),
         "defect": float(downscaler.last_defect),
         "wall_s": wall,
@@ -174,6 +209,7 @@ def convergence_curve_hh(comm, Ndoms: list[int], nloc: int,
                          degreeU: int, degreeP: int, alpha: float,
                          basis_kind: str = "legendre_P",
                          include_raw_mrcm: bool = False,
+                         mode: str = "mixed",
                          verbose: bool = True) -> dict:
     """Modo Hh: nloc fixo, Ndom varre → H e h proporcionais.
 
@@ -188,21 +224,22 @@ def convergence_curve_hh(comm, Ndoms: list[int], nloc: int,
         "meta": _make_meta("convergence_hh", comm,
                            nloc=nloc, degreeU=degreeU, degreeP=degreeP,
                            alpha=alpha, basis_kind=basis_kind,
-                           Ndoms=list(Ndoms), dt=dt),
+                           Ndoms=list(Ndoms), dt=dt, mode=mode),
         "cases": [],
     }
 
     for Ndom in Ndoms:
         case = _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP,
-                                 alpha, basis_kind, dt, include_raw_mrcm)
+                                 alpha, basis_kind, dt, include_raw_mrcm,
+                                 mode=mode)
         results["cases"].append(case)
         if verbose and comm.rank == 0:
             extra = ""
             if include_raw_mrcm and case.get("err_raw_mrcm") is not None:
-                extra = f"  raw={case['err_raw_mrcm']:.4e}"
+                extra = f"  raw={_fmt(case['err_raw_mrcm'])}"
             print(f"  Ndom={Ndom:3d}  H={case['H']:.4f}  h={case['h']:.5f}  "
-                  f"N={case['N']:4d}:  err_exato={case['err_vs_exact']:.4e}  "
-                  f"err_fino={case['err_vs_fine']:.4e}{extra}  "
+                  f"N={case['N']:4d}:  err_exato={_fmt(case['err_vs_exact'])}  "
+                  f"err_fino={_fmt(case['err_vs_fine'])}{extra}  "
                   f"div={case['divmax']:.1e}  ({case['wall_s']:.1f}s)",
                   flush=True)
 
@@ -215,6 +252,9 @@ def convergence_curve_hh(comm, Ndoms: list[int], nloc: int,
                                           verbose and comm.rank == 0)
         results["rate_fine"] = _fit_rate(results["cases"], "H",
                                          "err_vs_fine",
+                                         verbose and comm.rank == 0)
+        results["rate_leak"] = _fit_rate(results["cases"], "H",
+                                         "leak_ratio",
                                          verbose and comm.rank == 0)
         if include_raw_mrcm:
             raw_cases = [c for c in results["cases"]
@@ -230,6 +270,7 @@ def convergence_curve_hh(comm, Ndoms: list[int], nloc: int,
 def convergence_curve_H(comm, Ndoms: list[int], h_fine_target: float,
                         degreeU: int, degreeP: int, alpha: float,
                         basis_kind: str = "legendre_P",
+                        mode: str = "mixed",
                         verbose: bool = True) -> dict:
     """Modo H (multiescala): h ~ fixo, Ndom varia → H→0.
 
@@ -245,20 +286,20 @@ def convergence_curve_H(comm, Ndoms: list[int], h_fine_target: float,
         "meta": _make_meta("convergence_H", comm,
                            h_target=h_fine_target, degreeU=degreeU,
                            degreeP=degreeP, alpha=alpha, basis_kind=basis_kind,
-                           Ndoms=list(Ndoms), dt=dt),
+                           Ndoms=list(Ndoms), dt=dt, mode=mode),
         "cases": [],
     }
 
     for Ndom in Ndoms:
         nloc = max(2, round(1.0 / (h_fine_target * Ndom)))
         case = _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP,
-                                 alpha, basis_kind, dt)
+                                 alpha, basis_kind, dt, mode=mode)
         results["cases"].append(case)
         if verbose and comm.rank == 0:
             print(f"  Ndom={Ndom:3d}  nloc={nloc:4d}  H={case['H']:.4f}  "
                   f"h={case['h']:.5f}  N={case['N']:4d}:  "
-                  f"err_exato={case['err_vs_exact']:.4e}  "
-                  f"err_fino={case['err_vs_fine']:.4e}  "
+                  f"err_exato={_fmt(case['err_vs_exact'])}  "
+                  f"err_fino={_fmt(case['err_vs_fine'])}  "
                   f"div={case['divmax']:.1e}  ({case['wall_s']:.1f}s)",
                   flush=True)
 
@@ -271,6 +312,9 @@ def convergence_curve_H(comm, Ndoms: list[int], h_fine_target: float,
         results["rate_fine"] = _fit_rate(results["cases"], "H",
                                          "err_vs_fine",
                                          verbose and comm.rank == 0)
+        results["rate_leak"] = _fit_rate(results["cases"], "H",
+                                         "leak_ratio",
+                                         verbose and comm.rank == 0)
 
     return results
 
@@ -278,6 +322,7 @@ def convergence_curve_H(comm, Ndoms: list[int], h_fine_target: float,
 def convergence_curve_h(comm, Ndom: int, nlocs: list[int],
                         degreeU: int, degreeP: int, alpha: float,
                         basis_kind: str = "legendre_P",
+                        mode: str = "mixed",
                         verbose: bool = True) -> dict:
     """Modo h (saturação): H fixo (Ndom fixo), nloc varre → h→0."""
     dt = 1.0
@@ -290,18 +335,18 @@ def convergence_curve_h(comm, Ndom: int, nlocs: list[int],
         "meta": _make_meta("convergence_h", comm,
                            Ndom=Ndom, H=1.0/Ndom, degreeU=degreeU,
                            degreeP=degreeP, alpha=alpha, basis_kind=basis_kind,
-                           nlocs=list(nlocs), dt=dt),
+                           nlocs=list(nlocs), dt=dt, mode=mode),
         "cases": [],
     }
 
     for nloc in nlocs:
         case = _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP,
-                                 alpha, basis_kind, dt)
+                                 alpha, basis_kind, dt, mode=mode)
         results["cases"].append(case)
         if verbose and comm.rank == 0:
             print(f"  nloc={nloc:3d}  h={case['h']:.5f}  N={case['N']:4d}:  "
-                  f"err_exato={case['err_vs_exact']:.4e}  "
-                  f"err_fino={case['err_vs_fine']:.4e}  "
+                  f"err_exato={_fmt(case['err_vs_exact'])}  "
+                  f"err_fino={_fmt(case['err_vs_fine'])}  "
                   f"div={case['divmax']:.1e}  ({case['wall_s']:.1f}s)",
                   flush=True)
 
@@ -314,6 +359,9 @@ def convergence_curve_h(comm, Ndom: int, nlocs: list[int],
         results["rate_fine"] = _fit_rate(results["cases"], "h",
                                          "err_vs_fine",
                                          verbose and comm.rank == 0)
+        results["rate_leak"] = _fit_rate(results["cases"], "h",
+                                         "leak_ratio",
+                                         verbose and comm.rank == 0)
 
     return results
 
@@ -322,6 +370,7 @@ def convergence_curve_p(comm, Ndom: int, nloc: int,
                         ks: list[int], alpha: float,
                         basis_kind: str = "legendre_P",
                         asymmetric_pairs: list[tuple[int, int]] | None = None,
+                        mode: str = "mixed",
                         verbose: bool = True) -> dict:
     """Modo p (grau): malha fixa, graus crescentes.
 
@@ -338,7 +387,7 @@ def convergence_curve_p(comm, Ndom: int, nloc: int,
     results = {
         "meta": _make_meta("convergence_p", comm,
                            Ndom=Ndom, nloc=nloc, alpha=alpha,
-                           basis_kind=basis_kind, dt=dt),
+                           basis_kind=basis_kind, dt=dt, mode=mode),
         "cases": [],
     }
 
@@ -351,14 +400,14 @@ def convergence_curve_p(comm, Ndom: int, nloc: int,
 
     for degU, degP in pairs:
         case = _run_one_hh_level(comm, Ndom, nloc, degU, degP,
-                                 alpha, basis_kind, dt)
+                                 alpha, basis_kind, dt, mode=mode)
         case["degreeU"] = degU
         case["degreeP"] = degP
         results["cases"].append(case)
         if verbose and comm.rank == 0:
             print(f"  (U{degU},P{degP}):  "
-                  f"err_exato={case['err_vs_exact']:.4e}  "
-                  f"err_fino={case['err_vs_fine']:.4e}  "
+                  f"err_exato={_fmt(case['err_vs_exact'])}  "
+                  f"err_fino={_fmt(case['err_vs_fine'])}  "
                   f"div={case['divmax']:.1e}  ({case['wall_s']:.1f}s)",
                   flush=True)
 
