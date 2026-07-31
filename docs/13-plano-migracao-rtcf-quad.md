@@ -174,7 +174,30 @@ gates, e cada gate registra o comando e a saída.
 
 ## 6. Geração de resultados
 
-Cinco famílias. Para cada uma: script, saída JSON versionada, e figura.
+### R0 — O que cada estudo de fato valida (ler antes de rotular qualquer tabela)
+
+Levantamento feito em 2026-07-31, verificado no código:
+
+| Estudo | laço temporal | referência |
+|---|---|---|
+| HH/Olshanskii (R1a, R2, R3) | **NÃO** — `hh_benchmark_mac` (`mprm/benchmarks/hh.py:68-100`) chama `mprm_projection_step` **uma vez**; não há `for step` em `mprm/benchmarks/` | **analítica** (campo de Olshanskii, Eq. 40 de Lages) |
+| HH sucessivas (**R2′, novo**) | **sim** (laço de projeções) | **analítica** |
+| Cavidade (R1b) | sim | malha fina, mesmo esquema |
+| Taylor–Green (**R6, novo**) | **sim** (Navier–Stokes completo) | **analítica** |
+| Ghia (R4) | sim | dados numéricos de terceiros |
+
+⚠️ **Consequência de rótulo.** R2 e R3 rodam sobre um benchmark **sem** evolução temporal:
+medem a convergência do **operador de projeção**, não do MPrM como solver de Navier–Stokes.
+Isso é intencional e correto — o Cap. 3 (`sec:verificacao-hh`) pede justamente isolar a
+decomposição "*sem a interferência da evolução temporal*". Mas as tabelas do Cap. 5 **têm de
+dizer isso**, sob pena de repetir o erro de rótulo da errata E20.
+
+Sem R2′ e R6, **nada no pacote valida o laço temporal contra solução analítica** — o
+cruzamento fica vazio.
+
+---
+
+Sete famílias. Para cada uma: script, saída JSON versionada, e figura.
 **Toda tabela declara `cell_shape`, `mixed_family`, `mixed_order`, δt, α (na convenção
 nova), (ℓ_U, ℓ_P) e `basis_kind`.**
 
@@ -195,6 +218,31 @@ nova), (ℓ_U, ℓ_P) e `basis_kind`.**
   pertence ao span da base nodal). **Reavaliar sob RTCF1** — se T7 (projeção π₀) for
   implementada, a restrição pode cair. Até lá, manter `legendre_P` e declarar.
 - **Formato:** matriz (ℓ_U, ℓ_P), como a Tabela 1 de Lages, o que permite confronto direto.
+
+### R2′ — Decomposições HH sucessivas (**NOVA — obrigatória**)
+
+Réplica da Fig. 7 de Lages, que eu havia omitido. Verbatim
+(`The_multiscale_projection_method...md:1128-1145`):
+
+> *"successive applications of the modified HH decomposition over the solution in each
+> iteration. More precisely, given u^k and p^k for some iteration k, starting with u⁰ = u and
+> p⁰ = p given by (40), we compute the steps: 1. Compute w^{k+1} = u^k + ∇p^k; 2. Solve
+> p^{k+1} from ∇²p^{k+1} = ∇·w^{k+1} using the multiscale method; 3. Compute
+> u^{k+1} = w^{k+1} − ∇p^{k+1}; 4. Advance k ← k+1"*
+>
+> *"the successive HH decompositions **do not introduce any growing errors or artifacts that
+> can be amplified**. We computed over hundreds of successive decompositions for different
+> interface spaces, resulting in constant errors with no indication of attaining a different
+> trend."*
+
+**Por que importa:** é o único estudo que combina **laço** com **referência analítica** sem
+sair do escopo da decomposição. Testa diretamente a preocupação levantada no Cap. 3
+(`sec:regularizacao`): o erro da decomposição realimentado passo a passo poderia acumular. E
+dá confronto direto com a Fig. 7 do artigo.
+
+**Custo:** baixo — um laço em torno de `mprm_projection_step`, partindo de u⁰ analítico.
+**Reportar:** erro contra o analítico × iteração, para várias combinações de espaço de
+interface e α; e `max|div u|` ao longo do laço. Centenas de iterações, como no artigo.
 
 ### R3 — Dependência do erro no refinamento Hh
 
@@ -225,6 +273,31 @@ nova), (ℓ_U, ℓ_P) e `basis_kind`.**
   discrepância junto à tampa vem da singularidade dos cantos e da resolução (Ghia tabula
   u=1 em y=1; a malha MAC tem u em y=1−h/2).
 
+### R6 — Taylor–Green com paredes de escorregamento (**NOVA — recomendada**)
+
+O único candidato a validar o **laço temporal completo contra solução exata**. Com a função
+de corrente ψ = sin(πx)sin(πy),
+
+    u₀ = ( π sin(πx)cos(πy),  −π cos(πx)sin(πy) ),      u(t) = e^{−2π²νt} u₀
+
+- **u·n = 0 nos quatro lados** do quadrado unitário ✅ (verificado à mão).
+- **∂u_t/∂n = 0 nas paredes** ✅ — bate com a condição *free-slip* implementada:
+  `SideBC(kind="slip")` (`mprm/problem.py:31`) e célula-fantasma = interior
+  (`mprm/transport.py:51-57`). O caminho de contorno já existe e é o validado (impermeável).
+
+**O que entrega, e nada mais entrega:** ordem de convergência **temporal**, e validação
+conjunta de convecção + difusão + projeção + integração contra solução exata.
+
+⚠️ **A verificar no papel antes de codar** (proposta, não fato estabelecido):
+1. que o termo convectivo (u·∇)u é gradiente puro para este ψ — é o resultado clássico do
+   Taylor–Green 2D, mas confirmar para esta normalização;
+2. que a variante **não incremental** de Chorin (a adotada) não degrada a ordem observada a
+   ponto de mascarar o teste — Guermond2006 documenta a limitação de ordem temporal dessa
+   variante, e o teste precisa distinguir erro de projeção de erro de passo fracionado.
+
+Se (1) falhar, o caminho alternativo é uma MMS instacionária com termo-fonte, mais flexível
+e mais artificial.
+
 ### R5 — Figuras de convergência
 
 Camada de plotagem consumindo os JSON de R1–R4. Um estilo único para todas.
@@ -239,8 +312,9 @@ Cada figura declara a configuração completa na legenda ou na nota.
 3. **G1** — MMS em RTCF1 × DQ0. Se falhar, parar: não há lastro para nada adiante.
 4. T4 (referência fina) → **G4**.
 5. T6 (MPrM + correção de β) → **G5**, **G2**, **G3**, **G6**.
-6. R4 (critério de estado estacionário — é código, não só resultado).
-7. R1 → R2 → R3 → R4 → R5.
+6. R4 (critério de estado estacionário) e R2′ (laço de HH sucessivas) — **são código**, não
+   só resultado. R6 exige antes a verificação no papel dos dois itens listados.
+7. R1 → R2 → R2′ → R3 → R4 → R6 → R5.
 8. T7 (π₀) se houver folga; T5 só se o SPE10 for para quads.
 
 ---
