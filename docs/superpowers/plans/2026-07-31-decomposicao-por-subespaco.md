@@ -350,6 +350,684 @@ A previsão a testar é, portanto, específica: **o $\alpha$ que minimiza o vaza
 
 ---
 
+# Fase 4 — O defeito de ortogonalidade
+
+> **Spec:** `docs/superpowers/specs/2026-07-31-defeito-ortogonalidade-design.md`
+
+As Fases 1–3 medem o erro por **subespaço** — quanto vaza de uma parcela para a
+outra. A Fase 4 mede a quantidade que a Seção `sec:erro-decomposicao` da
+dissertação identifica como **a** sede do erro, e que o capítulo de resultados
+promete medir diretamente:
+
+$$\int_\Omega \bm u_h\cdot\tilde{\bm v}_h \;=\; \int_\Gamma \big[\!\big[\,\psi_h\,(\bm u_h\cdot\hat{\bm n})\,\big]\!\big].$$
+
+Nenhuma execução até hoje calculou esse número. A Task 6 faz a leitura pelo
+volume, a Task 7 faz a leitura pelo esqueleto, e a discordância entre as duas é
+o veredito sobre a própria derivação do capítulo.
+
+**As Tasks 1–5 não são tocadas.** `hh_build_w` e `hh_benchmark_mac` seguem
+intactas, e as Global Constraints 1–7 valem sem exceção. Duas restrições
+próprias desta fase:
+
+8. **`last_potential` é atributo, não valor de retorno.** O plano de migração
+   RTCF/quadtree já altera a assinatura de `solve_patch` (2 → 3 valores) em outro
+   worktree. Nenhum passo desta fase pode alterar essa assinatura.
+9. **A Task 6 não pode depender da Task 7.** É ela que arbitra a Task 7; precisa
+   passar nos próprios testes sem que nada da Task 7 exista.
+
+| Arquivo | Responsabilidade | Estado |
+|---|---|---|
+| `mprm/benchmarks/hh.py` | `hh_ortho_defect`, `hh_assemble_psi`, `hh_ortho_skeleton`; chaves novas em `hh_benchmark_mode` | Modificar |
+| `mprm/downscaler.py` | `keep_potential`, `last_potential`, `_last_p` | Modificar |
+| `mprm/flow.py` | Popular e reunir `last_potential` (opt-in) | Modificar |
+| `mprm/benchmarks/convergence.py` | `ortho_cos` em cada `case`; `rate_ortho` | Modificar |
+| `tests/test_ortho_defect.py` | **Novo** — E13 | Criar |
+| `tests/test_convergence_subspace.py` | `--ortho` nas curvas e na varredura de α | Estender (Task 3) |
+| `docs/13-decomposicao-por-subespaco.md` | Seção do defeito de ortogonalidade | Estender (Task 5) |
+
+---
+
+### Task 6: O defeito pelo volume
+
+**Files:**
+- Modify: `mprm/benchmarks/hh.py`
+- Test: `tests/test_ortho_defect.py` (criar)
+
+**Interfaces:**
+- Consome: `_l2_mac(a1, a2, h) -> float` e `hh_benchmark_mode(...) -> dict` (Task 2); `hh_build_w_mode(N, mode)` (Task 1); `FineProjector(Nx, Ny, hx, hy, dt)` de `mprm/flow.py`, cujo `.step(w1, w2) -> (u1, u2)` projeta na malha fina global (um só subdomínio, sem esqueleto).
+- Produz: `_dot_mac(a1, a2, b1, b2, h) -> float`; `hh_ortho_defect(uh1, uh2, vt1, vt2, h) -> (ortho_abs, ortho_cos)`; e quatro chaves novas em `hh_benchmark_mode`: `ortho_abs` (float), `ortho_cos` (float ou `None`), `ortho_skel` (`None` até a Task 7) e `ortho_identity_rel` (`None` até a Task 7). Consumidas pelas Tasks 7 e 8.
+
+**Por que o cosseno.** $\langle\bm u_h,\tilde{\bm v}_h\rangle$ escala com o
+quadrado da amplitude da entrada; o cosseno não escala com nada. É a única
+métrica deste plano inteiro que é adimensional **por normalização**, e não por
+uma razão entre erro e referência. No modo `gradient`, em que `err_u` é `None`
+por falta de denominador, `ortho_cos` continua definido.
+
+- [ ] **Step 1: Escrever o teste que falha**
+
+```python
+# tests/test_ortho_defect.py
+"""E13 — defeito de ortogonalidade da decomposição multiescala.
+
+Hipótese (sec:erro-decomposicao da dissertação): as duas parcelas da
+decomposição de Helmholtz-Hodge multiescala NÃO são ortogonais, e o resíduo
+é a integral, sobre o esqueleto, do salto do produto entre pressão e fluxo
+normal. Critério: o defeito medido no pipeline multiescala é ordens de
+grandeza maior que o da projeção em malha fina, que não tem esqueleto.
+"""
+import numpy as np
+import pytest
+
+from mprm.benchmarks.hh import (hh_build_w_mode, hh_ortho_defect,
+                                hh_benchmark_mode)
+
+
+def test_cosseno_pequeno_para_o_par_analitico():
+    """u de Olshanskii e grad p̃ são ortogonais no contínuo.
+
+    Verifica o INSTRUMENTO, não o método: o cosseno discreto do par exato
+    deve ser pequeno e cair com o refino (erro de quadratura, O(h²)).
+    """
+    cos = {}
+    for N in (24, 48, 96):
+        _, _, u1, u2 = hh_build_w_mode(N, mode="solenoidal")
+        g1, g2, _, _ = hh_build_w_mode(N, mode="gradient")
+        _, c = hh_ortho_defect(u1, u2, g1, g2, 1.0 / N)
+        cos[N] = abs(c)
+    assert cos[96] < 1e-2, f"piso de quadratura alto demais: {cos[96]:.2e}"
+    assert cos[96] < cos[24], f"não caiu com o refino: {cos}"
+
+
+def test_cosseno_imune_a_amplitude():
+    """A propriedade que torna o cosseno superior a err_u e a leak_ratio."""
+    _, _, u1, u2 = hh_build_w_mode(32, mode="solenoidal")
+    g1, g2, _, _ = hh_build_w_mode(32, mode="gradient")
+    _, c1 = hh_ortho_defect(u1, u2, g1, g2, 1.0 / 32)
+    _, c2 = hh_ortho_defect(1e6 * u1, 1e6 * u2, 1e-3 * g1, 1e-3 * g2, 1.0 / 32)
+    assert np.isclose(c1, c2, rtol=1e-10)
+
+
+def test_defeito_e_maior_no_multiescala_que_na_malha_fina():
+    """A hipótese central: o defeito vem do esqueleto.
+
+    A malha fina global é um único subdomínio — não tem esqueleto, logo
+    eq:ErroOrtogonalidade não tem sobre o que integrar e só resta o piso de
+    quadratura. O multiescala com Ndom=3 tem 4 interfaces internas.
+    """
+    from mprm.flow import FineProjector
+
+    Ndom, nloc = 3, 16
+    N, h = Ndom * nloc, 1.0 / (Ndom * nloc)
+    w1, w2, _, _ = hh_build_w_mode(N, mode="mixed")
+
+    uf1, uf2 = FineProjector(N, N, h, h, 1.0).step(w1, w2)
+    _, cos_fino = hh_ortho_defect(uf1, uf2, w1 - uf1, w2 - uf2, h)
+
+    r = hh_benchmark_mode(Ndom=Ndom, nloc=nloc, alpha=1.0, mode="mixed")
+    cos_ms = r["ortho_cos"]
+
+    assert abs(cos_ms) > 10.0 * abs(cos_fino), (
+        f"defeito multiescala não excede o da malha fina: "
+        f"{cos_ms:.3e} vs {cos_fino:.3e}")
+
+
+def test_cosseno_definido_no_modo_gradient():
+    """err_u é None por falta de denominador; ortho_cos não é."""
+    r = hh_benchmark_mode(Ndom=3, nloc=16, alpha=1.0, mode="gradient")
+    assert r["err_u"] is None
+    assert r["ortho_cos"] is not None
+    assert abs(r["ortho_cos"]) <= 1.0, "cosseno fora de [-1, 1]"
+
+
+def test_chaves_do_esqueleto_ainda_nao_existem():
+    """Constraint 9: a Task 6 é auto-suficiente. Remover na Task 7."""
+    r = hh_benchmark_mode(Ndom=2, nloc=8, alpha=1.0, mode="mixed")
+    assert r["ortho_skel"] is None
+    assert r["ortho_identity_rel"] is None
+```
+
+- [ ] **Step 2: Rodar e confirmar que falha**
+
+```bash
+cd ~/mrcm/NavierStokes && source ~/venv-firedrake/bin/activate
+python -m pytest tests/test_ortho_defect.py -v
+```
+
+Esperado: `ImportError: cannot import name 'hh_ortho_defect'`.
+
+- [ ] **Step 3: Implementar**
+
+Em `mprm/benchmarks/hh.py`, junto de `_l2_mac` (criado na Task 2):
+
+```python
+def _dot_mac(a1, a2, b1, b2, h):
+    """Produto interno L² discreto na malha MAC, peso uniforme h².
+
+    O peso de borda é imaterial no arranjo impermeável: ali u·n = 0 e
+    portanto ṽ·n = 0. Deixa de ser imaterial com saída (outflow).
+    """
+    return float(h * h * (np.sum(a1 * b1) + np.sum(a2 * b2)))
+
+
+def hh_ortho_defect(uh1, uh2, vt1, vt2, h):
+    """Lado do VOLUME de eq:ErroOrtogonalidade.
+
+    Devolve (ortho_abs, ortho_cos):
+      ortho_abs = <u_h, ṽ_h>                        — com sinal
+      ortho_cos = <u_h, ṽ_h> / (‖u_h‖ ‖ṽ_h‖)        — adimensional
+
+    Zero no contínuo (Teorema HH). Não requer solução exata: é uma
+    inconsistência interna da solução calculada.
+    """
+    dot = _dot_mac(uh1, uh2, vt1, vt2, h)
+    nu = _l2_mac(uh1, uh2, h)
+    nv = _l2_mac(vt1, vt2, h)
+    cos = None if (nu == 0.0 or nv == 0.0) else dot / (nu * nv)
+    return dot, cos
+```
+
+Em `hh_benchmark_mode`, depois de obter `uh1, uh2` e antes do `return`:
+
+```python
+    vt1, vt2 = w1 - uh1, w2 - uh2
+    ortho_abs, ortho_cos = hh_ortho_defect(uh1, uh2, vt1, vt2, h)
+```
+
+e acrescentar ao dicionário devolvido:
+
+```python
+        "ortho_abs": ortho_abs,
+        "ortho_cos": ortho_cos,
+        "ortho_skel": None,           # Task 7
+        "ortho_identity_rel": None,   # Task 7
+```
+
+- [ ] **Step 4: Rodar os testes**
+
+```bash
+python -m pytest tests/test_ortho_defect.py -v
+python -m pytest tests/test_subspace_leakage.py tests/test_subspace_fields.py -q
+python -m pytest tests/test_convergence_hh.py -q
+```
+
+**Instrução a quem executa.** O terceiro teste é a hipótese central da fase, não
+um requisito. Se o defeito multiescala **não** exceder o da malha fina, isso
+contradiz `sec:erro-decomposicao` e é achado a reportar: marque
+`@pytest.mark.xfail(strict=True)` com justificativa e **registre os dois números
+medidos no relatório da task**. Não relaxe o fator 10.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add mprm/benchmarks/hh.py tests/test_ortho_defect.py
+git commit -m "feat(hh): defeito de ortogonalidade pelo volume
+
+Mede <u_h, ṽ_h>, que o Teorema HH anula no contínuo e a decomposição
+multiescala não anula. É a quantidade que sec:erro-decomposicao identifica
+como sede do erro e que o capítulo de resultados promete medir diretamente.
+
+Normalizado pelo produto das normas, é o cosseno do ângulo entre as duas
+parcelas: adimensional e imune à amplitude, ao contrário de err_u e de
+leak_ratio. Definido também no modo gradient, em que err_u não é.
+
+Não requer solução exata — é inconsistência interna da solução calculada."
+```
+
+---
+
+### Task 7: O defeito pelo esqueleto, e a identidade
+
+**Files:**
+- Modify: `mprm/downscaler.py` (`__init__` e final de `solve_patch`)
+- Modify: `mprm/flow.py` (`mprm_projection_step`)
+- Modify: `mprm/benchmarks/hh.py`
+- Test: `tests/test_ortho_defect.py` (acrescentar)
+
+**Interfaces:**
+- Consome: `hh_ortho_defect` (Task 6); `MACDownscaler.solve_patch(divw_loc, fW, fE, fS, fN, solid_loc=None) -> (vt1, vt2)` — assinatura **inalterada**, ver Constraint 8; `MPrMProjector.last_pT: dict[int, Function]`, preenchido em `projector.py:279` só para os subdomínios do rank.
+- Produz: `MACDownscaler.keep_potential: bool` (default `False`), `MACDownscaler.last_potential: dict[int, ndarray(n, m)]`; `hh_assemble_psi(downscaler, projector, Ndom, nloc) -> ndarray(N, N)`; `hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, dt) -> float`; e as chaves `ortho_skel` e `ortho_identity_rel` deixam de ser `None`. Consumidas pela Task 8.
+
+**A derivação, para quem for implementar.** Com $\tilde{\bm v}=\delta t\,\nabla p$
+(`mprm/downscaler.py:143-146`), Green aplicado subdomínio a subdomínio dá
+
+$$\int_\Omega \bm u_h\cdot\tilde{\bm v}_h
+= \delta t\sum_i\Big[-\int_{\Omega_i}(\nabla\cdot\bm u_h)\,p_i + \int_{\partial\Omega_i}(\bm u_h\cdot\hat{\bm n}_i)\,p_i\Big].$$
+
+O termo de volume morre porque a regularização impõe $\nabla\cdot\bm u_h=0$ em
+cada $\Omega_i$. Em $\partial\Omega$ vale $\bm u_h\cdot\hat{\bm n}=0$. Sobra o
+esqueleto, onde cada face é percorrida duas vezes com normais opostas. Numa
+interface vertical no índice global de face $I$, com $\hat{\bm n}_i=+\hat x$ para
+o subdomínio da esquerda, a contribuição é
+
+$$\delta t\;u_1[I,j]\,\big(p[I-1,j]-p[I,j]\big)\,h.$$
+
+**O problema da constante.** O potencial é pinado na célula 0 **de cada patch**
+(`downscaler.py:53` e `:92`), e constantes arbitrárias por subdomínio destruiriam
+o salto. A âncora é a média de `projector.last_pT[isub]`, a pressão do MRCM, que
+é globalmente consistente a menos de **uma** constante única — e essa constante
+única o salto não vê.
+
+**Este é o caveat central da task, e ele precisa aparecer no relatório.** O
+potencial do downscaler é pós-regularização; `last_pT` é pré-regularização. Eles
+diferem por mais do que uma constante. Se a identidade não fechar, a Task 7 pode
+estar medindo o erro da ancoragem em vez do defeito — e é por isso que a Task 6
+existe primeiro e é independente: ela não tem ambiguidade de constante nenhuma.
+
+- [ ] **Step 1: Escrever os testes que falham**
+
+Acrescentar a `tests/test_ortho_defect.py`, e **remover**
+`test_chaves_do_esqueleto_ainda_nao_existem`, que a Task 6 deixou justamente para
+ser removido aqui:
+
+```python
+def test_last_potential_e_opt_in():
+    """O caminho quente (von Kármán, cavidade) não paga pelo potencial."""
+    from mrcm.config import MRCMConfig
+    from mprm.downscaler import MACDownscaler
+
+    cfg = MRCMConfig(Ndomx=2, Ndomy=2, nlocx=8, nlocy=8,
+                     degreeU=1, degreeP=1, alpha=1.0,
+                     mixed_family="BDM", mixed_order=0,
+                     executor_kind="sequential")
+    d = MACDownscaler(cfg, 1.0)
+    assert d.keep_potential is False
+    assert d.last_potential == {}
+
+
+def test_psi_invariante_a_constante_global():
+    """O salto não vê a constante global remanescente da ancoragem."""
+    from mprm.benchmarks.hh import hh_ortho_skeleton
+
+    Ndom, nloc = 3, 16
+    N, h = Ndom * nloc, 1.0 / (Ndom * nloc)
+    rng = np.random.default_rng(0)
+    uh1 = rng.standard_normal((N + 1, N))
+    uh2 = rng.standard_normal((N, N + 1))
+    psi = rng.standard_normal((N, N))
+    a = hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, 1.0)
+    b = hh_ortho_skeleton(uh1, uh2, psi + 7.25, Ndom, nloc, h, 1.0)
+    assert np.isclose(a, b, rtol=1e-12, atol=1e-12)
+
+
+def test_esqueleto_nulo_sem_interfaces():
+    """Ndom=1 não tem esqueleto: eq:ErroOrtogonalidade não tem suporte."""
+    from mprm.benchmarks.hh import hh_ortho_skeleton
+
+    nloc = 16
+    rng = np.random.default_rng(1)
+    uh1 = rng.standard_normal((nloc + 1, nloc))
+    uh2 = rng.standard_normal((nloc, nloc + 1))
+    psi = rng.standard_normal((nloc, nloc))
+    assert hh_ortho_skeleton(uh1, uh2, psi, 1, nloc, 1.0 / nloc, 1.0) == 0.0
+
+
+def test_identidade_volume_esqueleto():
+    """H2 — as duas leituras de eq:ErroOrtogonalidade concordam.
+
+    Tolerância inicial deliberadamente frouxa: o número medido é o
+    resultado, não o critério. Ver a instrução do Step 4.
+    """
+    r = hh_benchmark_mode(Ndom=3, nloc=16, alpha=1.0, mode="mixed")
+    assert r["ortho_skel"] is not None
+    assert r["ortho_identity_rel"] < 0.2, (
+        f"volume={r['ortho_abs']:.6e}  esqueleto={r['ortho_skel']:.6e}  "
+        f"rel={r['ortho_identity_rel']:.3e}")
+
+
+def test_identidade_melhora_com_refino():
+    """Se a identidade é discreta, o resíduo cai com nloc."""
+    lo = hh_benchmark_mode(Ndom=3, nloc=8, alpha=1.0, mode="mixed")
+    hi = hh_benchmark_mode(Ndom=3, nloc=24, alpha=1.0, mode="mixed")
+    assert hi["ortho_identity_rel"] < lo["ortho_identity_rel"], (
+        f"{lo['ortho_identity_rel']:.3e} -> {hi['ortho_identity_rel']:.3e}")
+```
+
+- [ ] **Step 2: Rodar e confirmar que falha**
+
+```bash
+python -m pytest tests/test_ortho_defect.py -v
+```
+
+Esperado: `AttributeError: 'MACDownscaler' object has no attribute 'keep_potential'`.
+
+- [ ] **Step 3: Expor o potencial**
+
+Em `mprm/downscaler.py`, no fim de `__init__` (junto de `self.last_defect = 0.0`):
+
+```python
+        self.keep_potential = False   # opt-in: ver plano Fase 4, Task 7
+        self.last_potential = {}      # isub -> p (n, m), preenchido em flow.py
+        self._last_p = None           # potencial do ÚLTIMO solve_patch
+```
+
+Em `solve_patch`, imediatamente antes de `vt1 = np.empty((n + 1, m))`:
+
+```python
+        if self.keep_potential:
+            self._last_p = p.copy()
+```
+
+**Não** alterar a assinatura nem o valor de retorno de `solve_patch` — o plano
+RTCF/quadtree já mexe nisso em outro worktree (Constraint 8).
+
+- [ ] **Step 4: Reunir os potenciais em `mprm_projection_step`**
+
+Em `mprm/flow.py`, antes do laço `for isub in projector.my_subs:` (linha ~48):
+
+```python
+    if downscaler.keep_potential:
+        downscaler.last_potential = {}
+        my_pot = {}
+```
+
+dentro do laço, logo após a chamada a `solve_patch`:
+
+```python
+        if downscaler.keep_potential:
+            my_pot[isub] = downscaler._last_p
+```
+
+e depois do `allgather` já existente dos patches (linha ~72-77):
+
+```python
+    if downscaler.keep_potential:
+        for d in comm.allgather(my_pot):
+            downscaler.last_potential.update(d)
+```
+
+O `allgather` extra só ocorre com `keep_potential=True`. Com o default `False`,
+`mprm_projection_step` executa exatamente o mesmo trabalho de antes.
+
+- [ ] **Step 5: Implementar o lado do esqueleto**
+
+Em `mprm/benchmarks/hh.py`:
+
+```python
+def hh_assemble_psi(downscaler, projector, Ndom, nloc):
+    """Monta ψ_h global (N, N) a partir dos potenciais locais.
+
+    A constante de cada subdomínio é ancorada na média da pressão do MRCM,
+    que é globalmente consistente a menos de UMA constante — invisível ao
+    salto. Ver o caveat da Task 7: os dois potenciais diferem por mais do
+    que uma constante, e é a identidade com a Task 6 que arbitra isso.
+    """
+    N = Ndom * nloc
+    anchors = {isub: float(np.mean(pT.dat.data_ro))
+               for isub, pT in projector.last_pT.items()}
+    for d in projector.comm.allgather(anchors):
+        anchors.update(d)
+
+    psi = np.zeros((N, N))
+    for isub, p in downscaler.last_potential.items():
+        ix, iy = isub % Ndom, isub // Ndom
+        psi[ix * nloc:(ix + 1) * nloc, iy * nloc:(iy + 1) * nloc] = \
+            p - float(p.mean()) + anchors[isub]
+    return psi
+
+
+def hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, dt):
+    """Lado do ESQUELETO de eq:ErroOrtogonalidade.
+
+        δt ∫_Γ (u_h·n̂) [[ψ_h]]
+
+    Com a regularização, u_h·n̂ é unívoco no esqueleto e sai do salto: o que
+    resta é o fluxo normal vezes o SALTO DE PRESSÃO. A regularização conserta
+    o fluxo, não a pressão — daí o defeito sobreviver a ela.
+    """
+    N = Ndom * nloc
+    total = 0.0
+    for I in range(nloc, N, nloc):          # interfaces verticais, n̂ = +x
+        total += float(np.sum(uh1[I, :] * (psi[I - 1, :] - psi[I, :])))
+    for J in range(nloc, N, nloc):          # interfaces horizontais, n̂ = +y
+        total += float(np.sum(uh2[:, J] * (psi[:, J - 1] - psi[:, J])))
+    return dt * h * total
+```
+
+Em `hh_benchmark_mode`, ligar o opt-in logo após construir o downscaler:
+
+```python
+    downscaler.keep_potential = True
+```
+
+e, depois do bloco da Task 6, substituir os dois `None`:
+
+```python
+    psi = hh_assemble_psi(downscaler, projector, Ndom, nloc)
+    ortho_skel = hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, dt)
+    scale = max(abs(ortho_abs), abs(ortho_skel))
+    ortho_rel = None if scale == 0.0 else abs(ortho_abs - ortho_skel) / scale
+```
+
+com as chaves `"ortho_skel": ortho_skel` e `"ortho_identity_rel": ortho_rel`.
+
+- [ ] **Step 6: Rodar os testes**
+
+```bash
+python -m pytest tests/test_ortho_defect.py -v
+python -m pytest tests/ -q
+mpiexec -n 4 python -m pytest tests/test_ortho_defect.py -q
+```
+
+A execução em MPI importa aqui: `last_pT` só existe nos ranks donos, e
+`hh_assemble_psi` depende do `allgather` das âncoras. Se o valor de
+`ortho_skel` diferir entre 1 rank e 4 ranks, a reunião está errada.
+
+**Instrução a quem executa.** `test_identidade_volume_esqueleto` é a hipótese
+H2. Se falhar, **não relaxe a tolerância de 0.2**. Registre no relatório os três
+números (`ortho_abs`, `ortho_skel`, `ortho_identity_rel`), marque
+`@pytest.mark.xfail(strict=True)` com a justificativa, e diga explicitamente que
+o suspeito primário é a ancoragem da constante (§2.3 do spec) e não a derivação
+— porque a Task 6, que não depende de ancoragem nenhuma, já terá passado.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add mprm/downscaler.py mprm/flow.py mprm/benchmarks/hh.py \
+        tests/test_ortho_defect.py
+git commit -m "feat(hh): defeito de ortogonalidade pelo esqueleto
+
+Segunda leitura de eq:ErroOrtogonalidade: δt ∫_Γ (u_h·n̂)[[ψ_h]]. Com a
+regularização o fluxo normal é unívoco e sai do salto, restando o fluxo
+vezes o salto de PRESSÃO — que a regularização não conserta. Confrontada
+com a leitura pelo volume, verifica no discreto a derivação do capítulo.
+
+O potencial sai como atributo opt-in (keep_potential), e não como terceiro
+valor de retorno de solve_patch, cuja assinatura o plano RTCF/quadtree já
+altera em outro worktree. Com o default o caminho quente é o de antes.
+
+A constante de cada subdomínio é ancorada na média de last_pT. Os dois
+potenciais diferem por mais do que uma constante; a identidade com a
+leitura pelo volume, que não depende de ancoragem, é o árbitro."
+```
+
+---
+
+### Task 8: Propagar às varreduras e ao writeup
+
+**Files:**
+- Modify: `mprm/benchmarks/convergence.py`
+- Modify: `tests/test_convergence_subspace.py` (criado na Task 3)
+- Modify: `docs/13-decomposicao-por-subespaco.md` (criado na Task 5)
+
+**Interfaces:**
+- Consome: `hh_benchmark_mode` com as quatro chaves de ortogonalidade (Tasks 6 e 7); `_run_one_hh_level`, `_fit_rate(cases, x_key, err_key)` e as quatro `convergence_curve_*` de `convergence.py`, já com o parâmetro `mode` (Task 3).
+- Produz: `ortho_cos` e `ortho_identity_rel` em cada `case`; `rate_ortho` ao lado de `rate_exact`, `rate_fine` e `rate_leak`; flag `--ortho` em `tests/test_convergence_subspace.py`.
+
+**As duas hipóteses que esta task decide.**
+
+**H1 — o defeito é da escala $H$, não da escala $h$.** É a previsão central e é
+falseável. Refinar $h$ com $H$ fixo (o modo de saturação, `convergence_curve_h`)
+deve fazer `ortho_cos` **saturar num platô não nulo**; refinar $H$
+(`convergence_curve_H`) ou enriquecer a interface (`convergence_curve_p`) deve
+derrubá-lo. Se `ortho_cos` cair com $h$, o erro é de discretização e não da
+decomposição, e isso contradiz `sec:erro-decomposicao`.
+
+**H3 — enriquecer a interface reduz o defeito.** É a mesma previsão que a Task 2
+testa para `leak_ratio`, aplicada agora à quantidade que a tese identifica como a
+sede do erro. Decidida por `convergence_curve_p`, varrendo
+`degreeU = degreeP ∈ {1, 2, 3}` com malha fixa: `rate_ortho` deve ser negativa.
+
+**H4 — o $\alpha$ ótimo não é o mesmo das outras métricas.** Após a
+regularização, o defeito é uma integral do **salto de pressão**, e $\alpha$
+controla exatamente o balanço entre continuidade de pressão ($\alpha\to0$) e de
+fluxo ($\alpha\to\infty$). A previsão é que $\alpha$ pequeno reduza `ortho_cos` e
+que isso **conflite** com o $\alpha$ que minimiza `err_u`. A Task 4 já varre
+$\alpha \in \{10^{-3},10^{-2},0.1,1,10,10^2,10^3\}$; esta task só acrescenta a
+coluna e a comparação dos mínimos:
+
+```python
+def _argmin(cases, key):
+    valid = [c for c in cases if c.get(key) is not None]
+    return min(valid, key=lambda c: abs(c[key]))["alpha"] if valid else None
+
+a_err, a_leak = _argmin(cases, "err_vs_exact"), _argmin(cases, "leak_ratio")
+a_ortho = _argmin(cases, "ortho_cos")
+print(f"  alpha* : err_u={a_err}  leak={a_leak}  ortho={a_ortho}  "
+      f"coincidem={a_err == a_ortho}", flush=True)
+```
+
+- [ ] **Step 1: Carregar as métricas nos casos**
+
+Em `mprm/benchmarks/convergence.py`, dentro de `_run_one_hh_level`. **Leia a
+função antes de editar**: hoje ela não chama `hh_benchmark_mode` — monta o
+próprio `cfg`, o próprio `MPrMProjector`/`MACDownscaler` e chama
+`mprm_projection_step` diretamente (`convergence.py:55-80`), porque também
+precisa da referência em malha fina (`FineProjector`) para `err_vs_fine`. A Task
+3 pode ou não tê-la feito delegar. Os dois caminhos:
+
+**Se a Task 3 fez `_run_one_hh_level` delegar a `hh_benchmark_mode`**, basta ler
+as chaves do dicionário devolvido (`res`):
+
+```python
+        "ortho_cos": res.get("ortho_cos"),
+        "ortho_identity_rel": res.get("ortho_identity_rel"),
+```
+
+`.get` e não indexação, para tolerar um `res` sem as chaves.
+
+**Se ela continua montando o pipeline inline**, calcular ali mesmo — é o caminho
+que não exige refatoração:
+
+```python
+    from mprm.benchmarks.hh import hh_ortho_defect, hh_assemble_psi, hh_ortho_skeleton
+
+    downscaler.keep_potential = True     # antes de mprm_projection_step
+    ...
+    ortho_abs, ortho_cos = hh_ortho_defect(uh1, uh2, w1 - uh1, w2 - uh2, h)
+    psi = hh_assemble_psi(downscaler, projector, Ndom, nloc)
+    ortho_skel = hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, dt)
+    scale = max(abs(ortho_abs), abs(ortho_skel))
+    ortho_rel = None if scale == 0.0 else abs(ortho_abs - ortho_skel) / scale
+```
+
+e acrescentar `"ortho_cos": ortho_cos` e `"ortho_identity_rel": ortho_rel` ao
+dicionário do caso. Registre no relatório qual dos dois caminhos encontrou.
+
+- [ ] **Step 2: Ajustar o ajuste de taxa**
+
+`_fit_rate` faz `errs = [c[err_key] for c in ordered]` e passa a
+`compute_convergence_rate`, que quebra com `None`. Filtrar antes:
+
+```python
+    ordered = [c for c in sorted(cases, key=lambda c: -c[x_key])
+               if c.get(err_key) is not None]
+    if len(ordered) < 2:
+        return None
+```
+
+Isso serve a `rate_ortho` e resolve, de uma vez, o `err_vs_exact = None` do modo
+`gradient` que a Task 3 Step 2 já apontava. Acrescentar
+`rate_ortho = _fit_rate(cases, x_key, "ortho_cos")` ao lado das taxas
+existentes, em cada uma das quatro curvas.
+
+- [ ] **Step 3: Verificar que nada quebrou**
+
+```bash
+python -m pytest tests/test_convergence_hh.py -q
+python tests/test_convergence_subspace.py --quick
+```
+
+- [ ] **Step 4: Acrescentar a coluna às curvas e à varredura de α**
+
+Em `tests/test_convergence_subspace.py`: flag `--ortho` (default ligado), coluna
+`ortho_cos` nas tabelas impressas e no JSON, e um eixo secundário na figura. Na
+varredura de $\alpha$ da Task 4, reportar **dois** mínimos — o $\alpha$ que
+minimiza `leak_ratio` e o que minimiza `ortho_cos` — e registrar se coincidem.
+
+O envelope autodescritivo (Constraint 5) ganha as hipóteses novas:
+
+```python
+    "hypothesis": {
+        "H1": "ortho_cos satura em platô não nulo sob refino de h com H fixo",
+        "H3": "enriquecer a interface (degreeU=degreeP) reduz ortho_cos",
+        "H4": "o alpha que minimiza ortho_cos difere do que minimiza err_u",
+    },
+    "criterion": {
+        "H1": "|d log ortho_cos / d log h| < 0.2 no modo de saturação",
+        "H3": "rate_ortho < 0 na curva p",
+        "H4": "argmin_alpha ortho_cos != argmin_alpha err_u",
+    },
+```
+
+- [ ] **Step 5: Rodar completo**
+
+```bash
+mpiexec -n 4 python tests/test_convergence_subspace.py \
+    --modes gradient,solenoidal,mixed --Ndoms 2,4,8,16 --ortho
+mpiexec -n 4 python tests/test_convergence_subspace.py \
+    --alphas 1e-3,1e-2,0.1,1,10,100,1e3 --ortho
+mpiexec -n 4 python tests/test_convergence_subspace.py \
+    --degrees 1,2,3 --ortho
+```
+
+Preencher `verdict` para H1, H3 e H4 com o número medido. **Todos os vereditos
+são aceitáveis**: hipótese refutada é resultado, não falha.
+
+- [ ] **Step 6: Estender o writeup**
+
+Acrescentar a `docs/13-decomposicao-por-subespaco.md` uma seção
+"O defeito de ortogonalidade", com:
+
+1. A identidade `eq:ErroOrtogonalidade`, as duas leituras, e por que o cosseno é
+   preferível a `err_u` e a `leak_ratio` — auto-contido, adimensional por
+   normalização, definido também no modo `gradient`.
+2. A tabela de vereditos H1–H4 com os valores medidos, integrada à tabela que a
+   Task 5 já criou.
+3. O caveat da ancoragem da constante (§2.3 do spec) e o que a identidade
+   H2 disse sobre ele.
+4. **A limitação declarada:** o contraste com/sem regularização não foi medido.
+   `sec:erro-decomposicao` afirma que a regularização recupera a divergência nula
+   e não a ortogonalidade; esta fase mede apenas o lado "com regularização".
+   Medir o outro exigiria reconstruir `projector.last_uT` (BDM em triângulos) nas
+   faces MAC, e o erro dessa interpolação entraria no próprio instrumento de
+   medida. Registrar como trabalho seguinte, **com a razão** — sem isso, uma
+   leitura futura vai supor que a afirmação foi verificada inteira.
+5. Que o instrumento é auto-contido e portanto se aplica à cavidade, ao obstáculo
+   e à decomposição por *quadtree*, que não têm solução manufaturada. Fora do
+   escopo deste plano, que segue o caminho do Olshanskii.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add mprm/benchmarks/convergence.py tests/test_convergence_subspace.py \
+        docs/13-decomposicao-por-subespaco.md
+git commit -m "feat(convergence): defeito de ortogonalidade nas varreduras
+
+ortho_cos entra nas quatro curvas e na varredura de alpha, com rate_ortho.
+_fit_rate passa a ignorar pontos None, o que também resolve err_vs_exact
+ausente no modo gradient.
+
+Decide H1 (o defeito é da escala H, não da escala h: satura sob refino de h
+com H fixo) e H4 (o alpha que minimiza o defeito difere do que minimiza
+err_u, porque o defeito é uma integral do salto de PRESSÃO e alpha controla
+o balanço pressão/fluxo).
+
+O writeup registra a limitação: o contraste com/sem regularização não foi
+medido, e por quê."
+```
+
+---
+
 ## Critérios de aceitação
 
 1. `python -m pytest tests/ -q` passa, incluindo os testes preexistentes de convergência.
@@ -358,6 +1036,19 @@ A previsão a testar é, portanto, específica: **o $\alpha$ que minimiza o vaza
 4. A hipótese de que o erro se aloja na parcela irrotacional tem veredito registrado — confirmada ou refutada, ambas aceitáveis.
 5. A linearidade do pipeline está verificada por teste, e a omissão da varredura de amplitude está documentada com a razão.
 6. Todo JSON traz envelope autodescritivo e `git_commit`.
+
+### Critérios de aceitação — Fase 4
+
+7. O defeito de ortogonalidade `eq:ErroOrtogonalidade` está medido pelas **duas**
+   leituras, volume e esqueleto, e a discordância entre elas está registrada com
+   o número medido.
+8. `solve_patch` mantém assinatura e valor de retorno (Constraint 8); o potencial
+   sai por `keep_potential`/`last_potential`, e com o default `False` o caminho
+   de `mprm_projection_step` é bit-a-bit o de antes.
+9. `ortho_skel` coincide entre execução sequencial e `mpiexec -n 4`.
+10. H1 e H4 têm veredito registrado, confirmado ou refutado.
+11. O writeup declara explicitamente que o contraste com/sem regularização **não**
+    foi medido, e a razão.
 
 ## O que fica de fora
 

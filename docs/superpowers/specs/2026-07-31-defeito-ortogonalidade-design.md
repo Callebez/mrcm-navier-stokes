@@ -75,10 +75,12 @@ def hh_ortho_defect(uh1, uh2, vt1, vt2, h):
     """
 ```
 
-Quadratura: soma sobre faces com peso $h^2$, meia-célula nas faces externas. Como
-$\bm u_h\cdot\hat{\bm n}=0$ no contorno impermeável, a escolha do peso de borda é
-imaterial no arranjo do benchmark; ela é registrada mesmo assim, porque deixa de
-ser imaterial nos arranjos com saída (`outflow`).
+Quadratura: soma sobre todas as faces com peso uniforme $h^2$, idêntica à de
+`_l2_mac` (Task 2). Nas faces externas o arranjo impermeável tem
+$\bm u_h\cdot\hat{\bm n}=0$ e portanto $\tilde{\bm v}\cdot\hat{\bm n}=0$, de modo
+que o peso de borda não altera o resultado. Registra-se a escolha porque ela
+deixa de ser imaterial em arranjos com saída (`outflow`), fora do escopo deste
+plano.
 
 ### 2.2 Lado do esqueleto
 
