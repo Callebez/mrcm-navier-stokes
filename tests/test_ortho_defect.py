@@ -1,0 +1,80 @@
+"""E13 — defeito de ortogonalidade da decomposição multiescala.
+
+Hipótese (sec:erro-decomposicao da dissertação): as duas parcelas da
+decomposição de Helmholtz-Hodge multiescala NÃO são ortogonais, e o resíduo
+é a integral, sobre o esqueleto, do salto do produto entre pressão e fluxo
+normal. Critério: o defeito medido no pipeline multiescala é ordens de
+grandeza maior que o da projeção em malha fina, que não tem esqueleto.
+
+Esta é a quantidade que o capítulo de resultados promete medir DIRETAMENTE
+(eq:ErroOrtogonalidade) e que nenhuma execução havia calculado.
+"""
+import numpy as np
+
+from mprm.benchmarks.hh import (hh_build_w_mode, hh_ortho_defect,
+                                hh_benchmark_mode)
+
+
+def test_cosseno_pequeno_para_o_par_analitico():
+    """u de Olshanskii e grad p̃ são ortogonais no contínuo.
+
+    Verifica o INSTRUMENTO, não o método: o cosseno discreto do par exato
+    deve ser pequeno e cair com o refino (erro de quadratura).
+    """
+    cos = {}
+    for N in (24, 48, 96):
+        _, _, u1, u2 = hh_build_w_mode(N, mode="solenoidal")
+        g1, g2, _, _ = hh_build_w_mode(N, mode="gradient")
+        _, c = hh_ortho_defect(u1, u2, g1, g2, 1.0 / N)
+        cos[N] = abs(c)
+    assert cos[96] < 1e-2, f"piso de quadratura alto demais: {cos[96]:.2e}"
+    assert cos[96] < cos[24], f"não caiu com o refino: {cos}"
+
+
+def test_cosseno_imune_a_amplitude():
+    """A propriedade que torna o cosseno superior a err_u e a leak_ratio."""
+    _, _, u1, u2 = hh_build_w_mode(32, mode="solenoidal")
+    g1, g2, _, _ = hh_build_w_mode(32, mode="gradient")
+    _, c1 = hh_ortho_defect(u1, u2, g1, g2, 1.0 / 32)
+    _, c2 = hh_ortho_defect(1e6 * u1, 1e6 * u2, 1e-3 * g1, 1e-3 * g2, 1.0 / 32)
+    assert np.isclose(c1, c2, rtol=1e-10)
+
+
+def test_defeito_e_maior_no_multiescala_que_na_malha_fina():
+    """A hipótese central: o defeito vem do esqueleto.
+
+    A malha fina global é um único subdomínio — não tem esqueleto, logo
+    eq:ErroOrtogonalidade não tem sobre o que integrar e só resta o piso de
+    quadratura. O multiescala com Ndom=3 tem 4 interfaces internas.
+    """
+    from mprm.flow import FineProjector
+
+    Ndom, nloc = 3, 16
+    N = Ndom * nloc
+    h = 1.0 / N
+    w1, w2, _, _ = hh_build_w_mode(N, mode="mixed")
+
+    uf1, uf2 = FineProjector(N, N, h, h, 1.0).step(w1, w2)
+    _, cos_fino = hh_ortho_defect(uf1, uf2, w1 - uf1, w2 - uf2, h)
+
+    r = hh_benchmark_mode(Ndom=Ndom, nloc=nloc, alpha=1.0, mode="mixed")
+    cos_ms = r["ortho_cos"]
+
+    assert abs(cos_ms) > 10.0 * abs(cos_fino), (
+        f"defeito multiescala não excede o da malha fina: "
+        f"{cos_ms:.3e} vs {cos_fino:.3e}")
+
+
+def test_cosseno_definido_no_modo_gradient():
+    """err_u é None por falta de denominador; ortho_cos não é."""
+    r = hh_benchmark_mode(Ndom=3, nloc=16, alpha=1.0, mode="gradient")
+    assert r["err_u"] is None
+    assert r["ortho_cos"] is not None
+    assert abs(r["ortho_cos"]) <= 1.0, "cosseno fora de [-1, 1]"
+
+
+def test_chaves_do_esqueleto_ainda_nao_existem():
+    """Constraint 9: a Task 6 é auto-suficiente. Remover na Task 7."""
+    r = hh_benchmark_mode(Ndom=2, nloc=8, alpha=1.0, mode="mixed")
+    assert r["ortho_skel"] is None
+    assert r["ortho_identity_rel"] is None

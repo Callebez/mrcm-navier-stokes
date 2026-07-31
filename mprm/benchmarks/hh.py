@@ -102,6 +102,37 @@ def _l2_mac(a1, a2, h):
     return float(np.sqrt(h * h * (np.sum(a1 ** 2) + np.sum(a2 ** 2))))
 
 
+def _dot_mac(a1, a2, b1, b2, h):
+    """Produto interno L² discreto na malha MAC, peso uniforme h².
+
+    O peso de borda é imaterial no arranjo impermeável: ali u·n = 0 e
+    portanto ṽ·n = 0. Deixa de ser imaterial com saída (outflow).
+    """
+    return float(h * h * (np.sum(a1 * b1) + np.sum(a2 * b2)))
+
+
+def hh_ortho_defect(uh1, uh2, vt1, vt2, h):
+    """Lado do VOLUME de eq:ErroOrtogonalidade.
+
+    Devolve (ortho_abs, ortho_cos):
+      ortho_abs = <u_h, ṽ_h>                        — com sinal
+      ortho_cos = <u_h, ṽ_h> / (‖u_h‖ ‖ṽ_h‖)        — adimensional
+
+    Zero no contínuo: o Teorema HH garante que as duas parcelas da
+    decomposição são L²-ortogonais. Na decomposição multiescala não são, e
+    o resíduo é a integral de salto sobre o esqueleto (Task 7).
+
+    Não requer solução exata — é uma inconsistência INTERNA da solução
+    calculada. É o que torna a métrica aplicável a arranjos sem solução
+    manufaturada (cavidade, obstáculo, quadtree).
+    """
+    dot = _dot_mac(uh1, uh2, vt1, vt2, h)
+    nu = _l2_mac(uh1, uh2, h)
+    nv = _l2_mac(vt1, vt2, h)
+    cos = None if (nu == 0.0 or nv == 0.0) else dot / (nu * nv)
+    return dot, cos
+
+
 def _make_pipeline(Ndom, nloc, degreeU, degreeP, alpha, dt, comm=None):
     """Monta o par (projetor MRCM, downscaler MAC) do benchmark HH."""
     if comm is None:
@@ -156,11 +187,21 @@ def hh_benchmark_mode(Ndom=3, nloc=30, degreeU=1, degreeP=1, alpha=1.0,
     err_abs = _l2_mac(uh1 - u1, uh2 - u2, h)
     den = _l2_mac(u1, u2, h)
     wnorm = _l2_mac(w1, w2, h)
+
+    # eq:ErroOrtogonalidade, lado do volume. ṽ = w − u por construção
+    # (mprm/flow.py), de modo que não é preciso plumbing nenhum.
+    vt1, vt2 = w1 - uh1, w2 - uh2
+    ortho_abs, ortho_cos = hh_ortho_defect(uh1, uh2, vt1, vt2, h)
+
     return {
         "err_u": None if den == 0.0 else err_abs / den,
         "err_abs": err_abs,
         "leak_ratio": None if wnorm == 0.0 else err_abs / wnorm,
         "mode": mode,
+        "ortho_abs": ortho_abs,
+        "ortho_cos": ortho_cos,
+        "ortho_skel": None,           # Task 7
+        "ortho_identity_rel": None,   # Task 7
         "divmax": float(np.abs(mac_divergence(uh1, uh2, h, h)).max()),
         "defect": downscaler.last_defect,
         "u": (uh1, uh2), "u_exact": (u1, u2), "w": (w1, w2), "N": N,
