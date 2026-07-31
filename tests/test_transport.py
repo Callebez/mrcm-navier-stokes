@@ -39,17 +39,49 @@ def _wstar_legacy(u, v, hx, hy, dt, nu, lid_velocity=1.0):
     return w1, w2
 
 
-def test_cavity_transporte_bit_identico_ao_legado():
+def _cavity_setup(N=16):
     rng = np.random.default_rng(0)
-    N = 16
     u = rng.standard_normal((N + 1, N)); u[0, :] = u[-1, :] = 0.0
     v = rng.standard_normal((N, N + 1)); v[:, 0] = v[:, -1] = 0.0
-    hx = hy = 1.0 / N; dt = 1e-3; nu = 1e-2; lid = 1.3
+    return u, v, 1.0 / N, 1.0 / N, 1e-3, 1e-2, 1.3
+
+
+def test_cavity_ordem1_bit_identico_ao_legado():
+    """O estêncil donor-cell de 1ª ordem reproduz o legado bit-a-bit.
+
+    A equivalência vale para `convective_order=1`, e SÓ para ele. O default
+    de `mac_transport` é 2 desde 4e40213, que introduziu advecção TVD de 2ª
+    ordem para reduzir dissipação numérica — mudança deliberada. Sem o
+    argumento explícito este teste compara donor-cell com TVD e falha por
+    premissa errada, não por regressão.
+    """
+    u, v, hx, hy, dt, nu, lid = _cavity_setup()
     w1a, w2a = _wstar_legacy(u, v, hx, hy, dt, nu, lid)
-    prob = cavity_problem(N, Re=lid / nu, lid_velocity=lid)
-    w1b, w2b = mac_transport(u, v, prob, dt)
+    prob = cavity_problem(16, Re=lid / nu, lid_velocity=lid)
+    w1b, w2b = mac_transport(u, v, prob, dt, convective_order=1)
     assert np.allclose(w1a, w1b, atol=1e-14, rtol=0)
     assert np.allclose(w2a, w2b, atol=1e-14, rtol=0)
+
+
+def test_default_e_tvd_de_segunda_ordem():
+    """Guarda o default: se voltar a 1, a dissipação de 4e40213 volta junto.
+
+    O teste anterior deixou de flagrar isso ao fixar convective_order=1.
+    Aqui a diferença em relação ao donor-cell é o que se exige, e verifica-se
+    que ela vem da CONVECÇÃO — a difusão é idêntica nos dois ramos.
+    """
+    u, v, hx, hy, dt, nu, lid = _cavity_setup()
+    prob = cavity_problem(16, Re=lid / nu, lid_velocity=lid)
+    d1 = mac_transport(u, v, prob, dt, convective_order=1)
+    dflt = mac_transport(u, v, prob, dt)
+    assert not np.allclose(d1[0], dflt[0], atol=1e-14, rtol=0), (
+        "default voltou a 1ª ordem — TVD desligado sem aviso")
+
+    # com nu→0 sobra só a convecção, e é ela que responde pela diferença
+    prob0 = cavity_problem(16, Re=lid / 1e-12, lid_velocity=lid)
+    c1 = mac_transport(u, v, prob0, dt, convective_order=1)[0]
+    c2 = mac_transport(u, v, prob0, dt)[0]
+    assert np.abs(c1 - c2).max() > 1e-6, "diferença não vem da convecção"
 
 
 def test_wrapper_mac_wstar_igual_a_transport():

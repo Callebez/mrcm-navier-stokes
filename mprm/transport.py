@@ -97,10 +97,13 @@ def mac_transport(u, v, problem: "FlowProblem", dt, convective_order=2, limiter=
     """Velocidade tentativa w* = uⁿ + δt(−∇·(uu) + ν∇²u + f) na malha MAC,
     para um `FlowProblem` arbitrário (contorno + obstáculo).
 
-    Convecção upwind (donor-cell) + difusão central (§2.6 do artigo). A
-    cavidade é o caso `cavity_problem(...)` e reproduz o estêncil antigo
-    bit-a-bit. Entrada/paredes/obstáculo tratados via fantasmas + máscara
-    de faces sólidas.
+    Convecção upwind + difusão central (§2.6 do artigo). Entrada, paredes e
+    obstáculo tratados via fantasmas + máscara de faces sólidas.
+
+    A cavidade (`cavity_problem(...)`) reproduz o estêncil antigo bit-a-bit
+    **apenas com `convective_order=1`** — o donor-cell de 1ª ordem. Com o
+    default 2 a convecção é TVD, deliberadamente diferente (menos dissipativa);
+    a difusão é a mesma nos dois ramos.
 
     Parameters
     ----------
