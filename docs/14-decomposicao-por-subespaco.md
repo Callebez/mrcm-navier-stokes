@@ -235,6 +235,36 @@ resta $\int_\Gamma (\bm u_h\cdot\bhat n)\,[\![\psi_h]\!]$ — o fluxo normal vez
 **salto de pressão**. A regularização conserta o fluxo, não a pressão. É por isso
 que o defeito sobrevive a ela.
 
+#### Ressalva ao item 2: no modo `gradient` a métrica não é independente
+
+Medido: a saída espúria é **ortogonal à entrada**,
+$\langle\bm u_h,\bm w\rangle = 7.4\times10^{-15}$. Disso segue, por álgebra,
+$\langle\bm u_h,\tilde{\bm v}\rangle = -\|\bm u_h\|^2$ e
+$\|\tilde{\bm v}\|=\sqrt{\|\bm w\|^2+\|\bm u_h\|^2}$, logo
+
+$$\cos\theta \;=\; -\,\frac{\texttt{leak\_ratio}}{\sqrt{1+\texttt{leak\_ratio}^2}}.$$
+
+A identidade foi verificada a $10^{-13}$ de erro relativo. **No modo `gradient`,
+portanto, o defeito de ortogonalidade não acrescenta informação a `leak_ratio`**
+— são a mesma medição reescalada, e é por isso que as duas curvas se sobrepõem na
+figura `e13_saturacao.png`.
+
+O valor independente da métrica aparece (i) no modo `mixed`, em que a razão
+$|\cos\theta|/\texttt{leak\_ratio}$ vale 0.244 e as curvas se separam; e (ii),
+sobretudo, em arranjos **sem solução exata**, em que `leak_ratio` não existe. Este
+é o uso que justifica o instrumento, e está fora do escopo deste estudo (§6.5).
+
+#### Um achado ao lado: o operador é uma projeção, só não é a ortogonal
+
+$\|P(P\bm w) - P\bm w\| / \|P\bm w\| = 2.9\times10^{-13}$. O operador multiescala
+**é idempotente até a precisão da máquina**.
+
+É a dissociação de `sec:erro-decomposicao` na sua forma mais nítida: o método
+entrega uma projeção legítima — idempotente, de divergência nula — que
+simplesmente não é a projeção *ortogonal*. Projeta, mas torto. As duas
+propriedades que o Teorema HH garante em conjunto aparecem aqui separadas, uma
+preservada e outra não, ao nível do operador e não apenas do campo.
+
 ### 6.2 A demonstração central: o esqueleto é a causa
 
 $N_{dom}=3$, `nloc=16`, $\alpha=1$:
@@ -279,6 +309,12 @@ Sob refino de $H$, por contraste, cai a $O(H^{1.993})$. O defeito é da escala $
 como `sec:erro-decomposicao` prevê — e a hipótese era falseável: se ele caísse com
 $h$, o erro seria de discretização e o capítulo estaria errado.
 
+**Figura:** `e13_saturacao.png`. Duas retas horizontais contra a referência
+$O(h)$, que cai por fator 4 no mesmo intervalo. No modo `gradient` a curva de
+`leak_ratio` corre exatamente sobre a de $|\cos\theta|$, pela identidade
+algébrica do §6.1; no modo `mixed` elas se separam por fator 4, e é essa
+separação que mostra o conteúdo próprio da métrica.
+
 #### H2 — as duas leituras concordam
 
 $N_{dom}=3$, modo `mixed`:
@@ -322,6 +358,10 @@ através de $\Gamma$ → salto menor → defeito menor. O fator muito maior no m
 `mixed` sugere cancelamento parcial de sinal entre as contribuições; não se
 extrai conclusão disso aqui.
 
+**Figura:** `e13_graus.png`. Ambas as curvas são retas em escala semilog, isto é,
+a redução é **geométrica no grau** — cada grau a mais divide o defeito por um
+fator aproximadamente constante (≈15× no modo `gradient`).
+
 ### 6.4 A limitação declarada
 
 **O contraste com e sem regularização não foi medido.**
@@ -354,11 +394,12 @@ de disparo único.
 
 | Exp | Objetivo | Comando | Tempo |
 |---|---|---|---|
-| **E13** | Defeito e identidade (unitário) | `python -m pytest tests/test_ortho_defect.py -v` | ~10 s |
+| **E13** | Defeito e identidade (unitário) | `python -m pytest tests/test_ortho_defect.py -v` | ~17 s |
 | **H1** | Saturação em $h$ | `mpiexec -n 4 python tests/test_convergence_subspace.py --nlocs 8,16,24,32 --Ndom 3 --modes gradient,mixed` | ~12 s |
 | **H3** | Graus de interface | `mpiexec -n 4 python tests/test_convergence_subspace.py --degrees 1,2,3 --Ndom 3 --nloc 16 --modes gradient,mixed` | ~9 s |
 
-**Saídas:** `e13_saturacao.json`, `e13_graus.json` no mesmo diretório.
+**Saídas:** `e13_saturacao.{json,png}` e `e13_graus.{json,png}` no mesmo
+diretório, ao lado de `e12_subspace.{json,png}` e `e12_subspace_alpha.{json,png}`.
 
 **Nota de implementação.** O potencial local sai por
 `MACDownscaler.keep_potential` / `.last_potential`, um atributo *opt-in*, e não

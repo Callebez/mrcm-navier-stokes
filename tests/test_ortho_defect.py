@@ -132,6 +132,59 @@ def test_identidade_volume_esqueleto():
         f"rel={r['ortho_identity_rel']:.3e}")
 
 
+def test_operador_multiescala_e_idempotente():
+    """A dissociação, no nível do OPERADOR.
+
+    sec:erro-decomposicao afirma que divergência nula e ortogonalidade se
+    dissociam. Aqui isso aparece na forma mais nítida possível: o operador
+    multiescala É uma projeção (P∘P = P até a precisão da máquina), só não
+    é a projeção ORTOGONAL. Projeta — mas torto.
+    """
+    from mprm.benchmarks.hh import (_make_pipeline, _project_once, _l2_mac)
+
+    Ndom, nloc = 3, 16
+    N = Ndom * nloc
+    h = 1.0 / N
+    w1, w2, _, _ = hh_build_w_mode(N, mode="mixed")
+    proj, down = _make_pipeline(Ndom, nloc, 1, 1, 1.0, 1.0)
+
+    p1, p2 = _project_once(w1, w2, projector=proj, downscaler=down)
+    pp1, pp2 = _project_once(p1, p2, projector=proj, downscaler=down)
+    rel = _l2_mac(pp1 - p1, pp2 - p2, h) / _l2_mac(p1, p2, h)
+    assert rel < 1e-9, f"operador não é idempotente: ‖P²w−Pw‖/‖Pw‖ = {rel:.2e}"
+
+
+def test_no_modo_gradient_o_cosseno_nao_e_independente():
+    """CAVEAT quantitativo: em modo gradient, cos e leak são a mesma coisa.
+
+    A saída espúria é ortogonal à entrada (<u_h, w> = 0), o que força
+        cos θ = −leak / sqrt(1 + leak²)
+    por álgebra. Nesse modo o defeito de ortogonalidade NÃO acrescenta
+    informação a leak_ratio — o valor independente aparece no modo mixed e,
+    sobretudo, em arranjos sem solução exata, onde leak_ratio nem existe.
+    """
+    from mprm.benchmarks.hh import (_make_pipeline, _project_once, _dot_mac)
+
+    Ndom, nloc = 3, 16
+    N = Ndom * nloc
+    h = 1.0 / N
+    w1, w2, _, _ = hh_build_w_mode(N, mode="gradient")
+    proj, down = _make_pipeline(Ndom, nloc, 1, 1, 1.0, 1.0)
+    u1, u2 = _project_once(w1, w2, projector=proj, downscaler=down)
+    assert abs(_dot_mac(u1, u2, w1, w2, h)) < 1e-12, "saída não é ⊥ à entrada"
+
+    g = hh_benchmark_mode(Ndom=Ndom, nloc=nloc, alpha=1.0, mode="gradient")
+    leak = g["leak_ratio"]
+    previsto = leak / np.sqrt(1.0 + leak * leak)
+    assert np.isclose(abs(g["ortho_cos"]), previsto, rtol=1e-8), (
+        f"cos={g['ortho_cos']:.8e}  previsto={previsto:.8e}")
+
+    # ... e no modo mixed as duas métricas de fato divergem
+    m = hh_benchmark_mode(Ndom=Ndom, nloc=nloc, alpha=1.0, mode="mixed")
+    razao = abs(m["ortho_cos"]) / m["leak_ratio"]
+    assert razao < 0.5, f"esperava divergência no modo mixed, razão={razao:.3f}"
+
+
 def test_identidade_melhora_com_refino():
     """Se a identidade é discreta, o resíduo cai com nloc."""
     lo = hh_benchmark_mode(Ndom=3, nloc=8, alpha=1.0, mode="mixed")

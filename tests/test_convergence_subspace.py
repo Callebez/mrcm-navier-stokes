@@ -421,6 +421,99 @@ def plot_results(results, outdir):
     return path
 
 
+def plot_saturacao(results, outdir):
+    """H1 — o defeito de ortogonalidade não vê h.
+
+    Duas curvas no mesmo eixo: ortho_cos, que deve ficar PLANO, e leak_ratio,
+    para contraste. O achado é a horizontalidade, não a inclinação.
+    """
+    plt = apply_plot_style()
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+
+    for mode, curve in results["curves"].items():
+        cases = sorted(curve["cases"], key=lambda c: -c["h"])
+        hs = np.array([c["h"] for c in cases])
+        _, color = MODE_STYLE.get(mode, ("o-", INK))
+        ortho = np.array([c["ortho_cos"] for c in cases])
+        r = curve.get("rate_ortho")
+        taxa = f"  taxa={r['rate']:+.3f}" if r else ""
+        ax.loglog(hs, ortho, "o-", color=color, markersize=8, linewidth=3.0,
+                  label=f"$|\\cos\\theta|$  {mode}{taxa}", zorder=3)
+        leak = [c["leak_ratio"] for c in cases]
+        if all(v is not None for v in leak):
+            # tracejado branco POR CIMA: no modo gradient as duas curvas
+            # coincidem por álgebra exata (cos = −leak/√(1+leak²), pois
+            # <u_h, w> = 0), e sem isto a de baixo fica invisível
+            ax.loglog(hs, leak, "--", color="white", linewidth=1.4,
+                      dashes=(4, 4), zorder=4)
+            ax.loglog(hs, leak, "s", color=color, markersize=4,
+                      markerfacecolor="white", markeredgewidth=1.2,
+                      zorder=5, label=f"leak_ratio  {mode}")
+
+    # referência O(h): o que uma quantidade governada por h faria
+    href = np.array([max(c["h"] for c in results["curves"][
+        next(iter(results["curves"]))]["cases"]),
+        min(c["h"] for c in results["curves"][
+            next(iter(results["curves"]))]["cases"])])
+    anchor = max(c["ortho_cos"] for c in
+                 results["curves"][next(iter(results["curves"]))]["cases"])
+    ax.loglog(href, anchor * (href / href[0]), "--", color=INK,
+              linewidth=1, alpha=0.45, label="referência $O(h)$")
+
+    Ndom = results["params"]["Ndom"]
+    ax.set_xlabel("$h$ (malha fina)")
+    ax.set_ylabel("métrica")
+    ax.set_title(f"H1 — o defeito de ortogonalidade não vê $h$ "
+                 f"($N_{{dom}}={Ndom}$, $H$ fixo)")
+    ax.legend(frameon=False, fontsize=8, loc="best")
+    ax.grid(True, which="both", alpha=0.25)
+    fig.tight_layout()
+
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "e13_saturacao.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ Figura: {path}")
+    return path
+
+
+def plot_graus(results, outdir):
+    """H3 — enriquecer a interface derruba o defeito."""
+    plt = apply_plot_style()
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+
+    for mode, curve in results["curves"].items():
+        cases = sorted(curve["cases"], key=lambda c: c.get("degreeU", 0))
+        ks = np.array([c.get("degreeU") for c in cases])
+        ortho = np.array([c["ortho_cos"] for c in cases])
+        style, color = MODE_STYLE.get(mode, ("o-", INK))
+        fator = ortho[0] / ortho[-1] if ortho[-1] else float("nan")
+        ax.semilogy(ks, ortho, style, color=color, markersize=9,
+                    linewidth=2.2, label=f"{mode}  ({fator:.0f}× do grau "
+                                         f"{ks[0]} ao {ks[-1]})")
+        for k, o in zip(ks, ortho):
+            ax.annotate(f"{o:.2e}", (k, o), textcoords="offset points",
+                        xytext=(0, 9), ha="center", fontsize=7, color=INK)
+
+    Ndom = results["params"]["Ndom"]
+    nloc = results["params"]["nloc"]
+    ax.set_xlabel("grau do espaço de interface ($k_U = k_P$)")
+    ax.set_ylabel(r"$|\cos\theta|$ — defeito de ortogonalidade")
+    ax.set_title(f"H3 — enriquecer a interface reduz o defeito "
+                 f"($N_{{dom}}={Ndom}$, nloc={nloc})")
+    ax.set_xticks(list(ks))
+    ax.legend(frameon=False, fontsize=9)
+    ax.grid(True, which="both", alpha=0.25)
+    fig.tight_layout()
+
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "e13_graus.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ Figura: {path}")
+    return path
+
+
 def plot_alpha(results, outdir):
     plt = apply_plot_style()
     fig, ax = plt.subplots(figsize=(8, 5.5))
@@ -488,12 +581,12 @@ def main(argv=None):
                                        parse_int_list(args.nlocs),
                                        args.degreeU, args.degreeP, args.alpha,
                                        verbose=args.verbose)
-        stem, plotter = "e13_saturacao", None
+        stem, plotter = "e13_saturacao", plot_saturacao
     elif args.degrees:
         results = run_degree_study(comm, modes, args.Ndom, nloc,
                                    parse_int_list(args.degrees), args.alpha,
                                    verbose=args.verbose)
-        stem, plotter = "e13_graus", None
+        stem, plotter = "e13_graus", plot_graus
     elif alphas:
         results = run_alpha_study(comm, modes, alphas, args.Ndom, nloc,
                                   args.degreeU, args.degreeP,
