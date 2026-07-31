@@ -73,8 +73,68 @@ def test_cosseno_definido_no_modo_gradient():
     assert abs(r["ortho_cos"]) <= 1.0, "cosseno fora de [-1, 1]"
 
 
-def test_chaves_do_esqueleto_ainda_nao_existem():
-    """Constraint 9: a Task 6 é auto-suficiente. Remover na Task 7."""
-    r = hh_benchmark_mode(Ndom=2, nloc=8, alpha=1.0, mode="mixed")
-    assert r["ortho_skel"] is None
-    assert r["ortho_identity_rel"] is None
+# ═══════════════════════════════════════════════════════════════════════════
+# Lado do esqueleto e a identidade (Task 7)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_last_potential_e_opt_in():
+    """O caminho quente (von Kármán, cavidade) não paga pelo potencial."""
+    from mrcm.config import MRCMConfig
+    from mprm.downscaler import MACDownscaler
+
+    cfg = MRCMConfig(Ndomx=2, Ndomy=2, nlocx=8, nlocy=8,
+                     degreeU=1, degreeP=1, alpha=1.0,
+                     mixed_family="BDM", mixed_order=0,
+                     executor_kind="sequential")
+    d = MACDownscaler(cfg, 1.0)
+    assert d.keep_potential is False
+    assert d.last_potential == {}
+
+
+def test_psi_invariante_a_constante_global():
+    """O salto não vê a constante global remanescente da ancoragem."""
+    from mprm.benchmarks.hh import hh_ortho_skeleton
+
+    Ndom, nloc = 3, 16
+    N = Ndom * nloc
+    h = 1.0 / N
+    rng = np.random.default_rng(0)
+    uh1 = rng.standard_normal((N + 1, N))
+    uh2 = rng.standard_normal((N, N + 1))
+    psi = rng.standard_normal((N, N))
+    a = hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, 1.0)
+    b = hh_ortho_skeleton(uh1, uh2, psi + 7.25, Ndom, nloc, h, 1.0)
+    assert np.isclose(a, b, rtol=1e-12, atol=1e-12)
+
+
+def test_esqueleto_nulo_sem_interfaces():
+    """Ndom=1 não tem esqueleto: eq:ErroOrtogonalidade não tem suporte."""
+    from mprm.benchmarks.hh import hh_ortho_skeleton
+
+    nloc = 16
+    rng = np.random.default_rng(1)
+    uh1 = rng.standard_normal((nloc + 1, nloc))
+    uh2 = rng.standard_normal((nloc, nloc + 1))
+    psi = rng.standard_normal((nloc, nloc))
+    assert hh_ortho_skeleton(uh1, uh2, psi, 1, nloc, 1.0 / nloc, 1.0) == 0.0
+
+
+def test_identidade_volume_esqueleto():
+    """H2 — as duas leituras de eq:ErroOrtogonalidade concordam.
+
+    Tolerância inicial deliberadamente frouxa: o número medido é o
+    resultado, não o critério.
+    """
+    r = hh_benchmark_mode(Ndom=3, nloc=16, alpha=1.0, mode="mixed")
+    assert r["ortho_skel"] is not None
+    assert r["ortho_identity_rel"] < 0.2, (
+        f"volume={r['ortho_abs']:.6e}  esqueleto={r['ortho_skel']:.6e}  "
+        f"rel={r['ortho_identity_rel']:.3e}")
+
+
+def test_identidade_melhora_com_refino():
+    """Se a identidade é discreta, o resíduo cai com nloc."""
+    lo = hh_benchmark_mode(Ndom=3, nloc=8, alpha=1.0, mode="mixed")
+    hi = hh_benchmark_mode(Ndom=3, nloc=24, alpha=1.0, mode="mixed")
+    assert hi["ortho_identity_rel"] < lo["ortho_identity_rel"], (
+        f"{lo['ortho_identity_rel']:.3e} -> {hi['ortho_identity_rel']:.3e}")

@@ -45,6 +45,10 @@ def mprm_projection_step(w1, w2, projector: "MPrMProjector",
     u = w1.copy(); v = w2.copy()
     zeros_m, zeros_n = np.zeros(m), np.zeros(n)
     my_patch = {}
+    keep_pot = getattr(downscaler, "keep_potential", False)
+    my_pot = {}
+    if keep_pot:
+        downscaler.last_potential = {}
     for isub in projector.my_subs:
         ix, iy = isub % cfg.Ndomx, isub // cfg.Ndomx
         ox, oy = ix * n, iy * m
@@ -68,6 +72,12 @@ def mprm_projection_step(w1, w2, projector: "MPrMProjector",
         vt1, vt2 = downscaler.solve_patch(
             divw[ox:ox + n, oy:oy + m], fW, fE, fS, fN, solid_loc=solid_loc)
         my_patch[isub] = (vt1, vt2)
+        if keep_pot:
+            my_pot[isub] = downscaler._last_p
+
+    if keep_pot:
+        for d in comm.allgather(my_pot):
+            downscaler.last_potential.update(d)
 
     for d in comm.allgather(my_patch):
         for isub, (vt1, vt2) in d.items():

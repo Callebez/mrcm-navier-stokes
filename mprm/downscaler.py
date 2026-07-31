@@ -56,6 +56,14 @@ class MACDownscaler:
         self._A_base = A.tocsc()          # sem sólido (referência p/ máscara)
         self._masked_lu = {}              # solid_loc.tobytes() -> splu
         self.last_defect = 0.0
+        # Potencial local (opt-in). Necessário para o lado do esqueleto de
+        # eq:ErroOrtogonalidade; com o default False o caminho quente
+        # (von Kármán, cavidade) não paga nem cópia nem comunicação.
+        # É atributo, e NÃO terceiro valor de retorno de solve_patch, cuja
+        # assinatura o plano de migração RTCF/quadtree já altera.
+        self.keep_potential = False
+        self.last_potential = {}          # isub -> p (n, m); preenchido em flow
+        self._last_p = None               # potencial do ÚLTIMO solve_patch
 
     def _build_masked_lu(self, solid_loc):
         """Fatoração FV para um padrão de sólido: células sólidas viram
@@ -138,6 +146,9 @@ class MACDownscaler:
             b[pin] = 0.0
             p = lu.solve(b).reshape((n, m), order="F")
             p[solid] = 0.0
+
+        if self.keep_potential:
+            self._last_p = p.copy()
 
         vt1 = np.empty((n + 1, m))
         vt1[1:-1, :] = dt * (p[1:, :] - p[:-1, :]) / hx

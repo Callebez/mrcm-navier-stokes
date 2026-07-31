@@ -133,6 +133,55 @@ def hh_ortho_defect(uh1, uh2, vt1, vt2, h):
     return dot, cos
 
 
+def hh_assemble_psi(downscaler, projector, Ndom, nloc):
+    """Monta ψ_h global (N, N) a partir dos potenciais locais.
+
+    O potencial do downscaler é pinado na célula 0 de CADA patch, e
+    constantes arbitrárias por subdomínio destruiriam o salto. A âncora é a
+    média de projector.last_pT[isub], a pressão do MRCM, globalmente
+    consistente a menos de UMA constante — que o salto não vê.
+
+    CAVEAT. O potencial do downscaler é pós-regularização e last_pT é
+    pré-regularização: eles diferem por mais do que uma constante. Se a
+    identidade com hh_ortho_defect (lado do volume, que não depende de
+    ancoragem nenhuma) não fechar, o suspeito primário é esta ancoragem, e
+    não a derivação de eq:ErroOrtogonalidade.
+    """
+    N = Ndom * nloc
+    anchors = {isub: float(np.mean(pT.dat.data_ro))
+               for isub, pT in projector.last_pT.items()}
+    for d in projector.comm.allgather(anchors):
+        anchors.update(d)
+
+    psi = np.zeros((N, N))
+    for isub, p in downscaler.last_potential.items():
+        ix, iy = isub % Ndom, isub // Ndom
+        psi[ix * nloc:(ix + 1) * nloc, iy * nloc:(iy + 1) * nloc] = \
+            p - float(p.mean()) + anchors.get(isub, 0.0)
+    return psi
+
+
+def hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, dt):
+    """Lado do ESQUELETO de eq:ErroOrtogonalidade.
+
+        δt ∫_Γ (u_h·n̂) [[ψ_h]]
+
+    Com a regularização, u_h·n̂ é unívoco no esqueleto e sai do salto: o que
+    resta é o fluxo normal vezes o SALTO DE PRESSÃO. A regularização conserta
+    o fluxo, não a pressão — daí o defeito sobreviver a ela.
+
+    Numa interface vertical de índice global de face I, com n̂ = +x para o
+    subdomínio da esquerda, a contribuição é δt·u1[I,j]·(p[I-1,j]−p[I,j])·h.
+    """
+    N = Ndom * nloc
+    total = 0.0
+    for I in range(nloc, N, nloc):          # interfaces verticais, n̂ = +x
+        total += float(np.sum(uh1[I, :] * (psi[I - 1, :] - psi[I, :])))
+    for J in range(nloc, N, nloc):          # interfaces horizontais, n̂ = +y
+        total += float(np.sum(uh2[:, J] * (psi[:, J - 1] - psi[:, J])))
+    return dt * h * total
+
+
 def _make_pipeline(Ndom, nloc, degreeU, degreeP, alpha, dt, comm=None):
     """Monta o par (projetor MRCM, downscaler MAC) do benchmark HH."""
     if comm is None:
@@ -181,6 +230,7 @@ def hh_benchmark_mode(Ndom=3, nloc=30, degreeU=1, degreeP=1, alpha=1.0,
     w1, w2, u1, u2 = hh_build_w_mode(N, mode=mode)
     projector, downscaler = _make_pipeline(Ndom, nloc, degreeU, degreeP,
                                            alpha, dt, comm)
+    downscaler.keep_potential = True       # lado do esqueleto (eq:ErroOrtog.)
     uh1, uh2 = _project_once(w1, w2, projector=projector,
                              downscaler=downscaler)
 
@@ -193,6 +243,12 @@ def hh_benchmark_mode(Ndom=3, nloc=30, degreeU=1, degreeP=1, alpha=1.0,
     vt1, vt2 = w1 - uh1, w2 - uh2
     ortho_abs, ortho_cos = hh_ortho_defect(uh1, uh2, vt1, vt2, h)
 
+    # ... e o lado do esqueleto, a segunda leitura da mesma identidade
+    psi = hh_assemble_psi(downscaler, projector, Ndom, nloc)
+    ortho_skel = hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, dt)
+    scale = max(abs(ortho_abs), abs(ortho_skel))
+    ortho_rel = None if scale == 0.0 else abs(ortho_abs - ortho_skel) / scale
+
     return {
         "err_u": None if den == 0.0 else err_abs / den,
         "err_abs": err_abs,
@@ -200,8 +256,8 @@ def hh_benchmark_mode(Ndom=3, nloc=30, degreeU=1, degreeP=1, alpha=1.0,
         "mode": mode,
         "ortho_abs": ortho_abs,
         "ortho_cos": ortho_cos,
-        "ortho_skel": None,           # Task 7
-        "ortho_identity_rel": None,   # Task 7
+        "ortho_skel": ortho_skel,
+        "ortho_identity_rel": ortho_rel,
         "divmax": float(np.abs(mac_divergence(uh1, uh2, h, h)).max()),
         "defect": downscaler.last_defect,
         "u": (uh1, uh2), "u_exact": (u1, u2), "w": (w1, w2), "N": N,
