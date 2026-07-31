@@ -125,6 +125,11 @@ def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
 
     case = {
         "Ndom": Ndom, "H": float(H), "h": float(h), "N": N,
+        # H/h = nloc por construção (H = 1/Ndom, h = 1/(Ndom·nloc)): é o
+        # número de incógnitas da malha fina por subdomínio e por direção.
+        # No modo Hh ele é MANTIDO CONSTANTE enquanto Ndom varre; é o que
+        # distingue esse modo dos modos H e h, em que ele varia.
+        "nloc": nloc, "H_over_h": float(H / h),
         "mode": mode,
         "err_vs_exact": _rel_err(uh1, uh2, u1, u2),
         "err_vs_fine": _rel_err(uh1, uh2, uf1, uf2),

@@ -132,6 +132,30 @@ def test_identidade_volume_esqueleto():
         f"rel={r['ortho_identity_rel']:.3e}")
 
 
+def test_ortho_cos_e_invariante_a_H_sobre_h():
+    """No modo Hh, H/h = nloc é constante; mas QUAL constante importa?
+
+    Com H fixo e H/h variando, ortho_cos deve ficar parado — o defeito é da
+    escala H. leak_ratio NÃO fica: no modo solenoidal ele mede o piso de
+    amostragem O(h²) do campo analítico, que cai com H/h. É por isso que a
+    razão gradient/solenoidal via leak_ratio depende de H/h (∝ (H/h)²) e via
+    ortho_cos não.
+    """
+    Ndom = 2
+    leak, ortho = {}, {}
+    for hh in (8, 16):
+        r = hh_benchmark_mode(Ndom=Ndom, nloc=hh, alpha=1.0,
+                              mode="solenoidal")
+        leak[hh], ortho[hh] = r["leak_ratio"], abs(r["ortho_cos"])
+
+    var_leak = max(leak.values()) / min(leak.values())
+    var_ortho = max(ortho.values()) / min(ortho.values())
+    assert var_leak > 2.0, (
+        f"leak_ratio deveria seguir o piso O(h²): variou {var_leak:.2f}×")
+    assert var_ortho < 1.3, (
+        f"ortho_cos deveria ser invariante a H/h: variou {var_ortho:.2f}×")
+
+
 def test_operador_multiescala_e_idempotente():
     """A dissociação, no nível do OPERADOR.
 

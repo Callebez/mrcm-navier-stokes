@@ -95,7 +95,7 @@ salvo indicação em contrário.
 
 | # | Hipótese | Veredito | Evidência |
 |---|---|---|---|
-| **E12a** | O erro se aloja na parcela irrotacional | **✓ confirmada** | `leak(gradient)/leak(solenoidal)` = **60×**, constante ao longo de todo o refino |
+| **E12a** | O erro se aloja na parcela irrotacional | **✓ confirmada** | razão gradient/solenoidal = **~23×** via `ortho_cos`, invariante a $H/h$ (ver §3.1.1 — o "60×" via `leak_ratio` era artefato de $H/h=16$) |
 | **E12b** | O modo `mixed` reproduz o `gradient` | **✓ confirmada** | desvio relativo **0.4%** |
 | **E12c** | O $\alpha$ ótimo diverge entre os modos | **✗ refutada como enunciada** | os argmins divergem (0.1 vs 1.0), mas o do modo `solenoidal` é ruído: aquela curva varia **0.28%** em seis décadas de $\alpha$ |
 
@@ -109,20 +109,57 @@ Curva $Hh$, $N_{dom} \in \{2,4,8,16\}$, `leak_ratio`:
 | `solenoidal` | 7.4161e-04 | 1.8481e-04 | 4.6163e-05 | 1.1539e-05 | **2.002** |
 | `mixed` | 4.4308e-02 | 1.1212e-02 | 2.8097e-03 | 7.0304e-04 | 1.993 |
 
-O resultado é mais forte do que a afirmação do capítulo. As duas parcelas
-convergem à **mesma taxa** $O(H^2)$, e a razão entre elas fica **constante em
-~60×** ao longo de todo o refino (60.0 no nível grosso, 61.2 no fino).
+As duas parcelas convergem à **mesma taxa** $O(H^2)$, e a razão entre elas fica
+constante ao longo do refino de $H$. Refinar $H$ **não muda o balanço**: a
+predominância irrotacional não é um transiente que o refino corrige.
 
-Refinar $H$ **não muda o balanço**. A predominância irrotacional não é um
-transiente que o refino corrige — é estrutural do método. Que é exatamente o que
-se espera se a causa for a perda de ortogonalidade no esqueleto, e não erro de
-discretização.
+**Mas o valor dessa razão depende de $H/h$, e isso corrige o que se poderia
+concluir daqui.** Ver §3.1.1.
 
-**Caveat.** O resíduo do modo `solenoidal` é **piso de amostragem, não defeito**:
-o campo de Olshanskii amostrado nas faces MAC tem divergência discreta
-$O(h)$ — medida em `1.33e-03` para $N=48$ — que o projetor legitimamente
-remove. A razão de 60× é, portanto, um limite **inferior** para a assimetria
-real entre as parcelas.
+### 3.1.1 O papel de $H/h$ — e por que `leak_ratio` engana aqui
+
+No modo $Hh$, $H/h = \texttt{nloc}$ é **mantido constante** enquanto
+$N_{dom}\times N_{dom}$ varre: é o número de incógnitas da malha fina por
+subdomínio e por direção. Ele é um parâmetro livre, e fixá-lo em 16 sem varrê-lo
+deixava em aberto de que ele depende.
+
+Varrendo $H/h \in \{8,16,32\}$ com $N_{dom} \in \{2,4,8\}$ (E12d):
+
+| $H/h$ | taxa `gradient` | taxa `solenoidal` | `ortho_cos` (H=0.5) | razão via `leak` | razão via `ortho` |
+|---|---|---|---|---|---|
+| 8 | 1.985 | 2.010 | 4.458e-02 | 14.9 | **24.9** |
+| 16 | 1.990 | 2.003 | 4.444e-02 | 60.0 | **23.0** |
+| 32 | 1.991 | 2.001 | 4.434e-02 | 240.0 | **22.6** |
+
+As **taxas são invariantes** a $H/h$ (spread 1.26%), e o defeito de
+ortogonalidade também (variação 0.5%). Isso generaliza H1: o defeito depende de
+$H$ **sozinho**.
+
+A razão medida por `leak_ratio`, porém, **quadruplica a cada duplicação de
+$H/h$** — é proporcional a $(H/h)^2$. A causa é a do caveat abaixo: o resíduo
+solenoidal é piso de amostragem $O(h^2)$, e refinar $h$ a $H$ fixo o divide por 4
+enquanto o defeito irrotacional não se move. **O "60×" é artefato de $H/h=16$,
+não propriedade do método.**
+
+Medida por `ortho_cos`, a razão é ~23 e **invariante a $H/h$** (24.9 → 23.0 →
+22.6). O motivo é estrutural: `ortho_cos` normaliza por $\|\tilde{\bm v}\|$,
+que encolhe junto com o piso, enquanto `leak_ratio` normaliza por $\|\bm w\|$,
+que é fixo. No modo `solenoidal`, ao varrer $H/h$, `leak_ratio` varia por fator
+**16.2** e `ortho_cos` por fator **1.10**.
+
+**Este é o argumento mais forte a favor do defeito de ortogonalidade como
+instrumento** — mais forte do que os três do §6.1, porque é quantitativo: ele
+isola a escala $H$ sem contaminação do piso de amostragem da malha fina.
+
+E há uma consequência física: como o piso solenoidal cai com $h$ e o defeito
+irrotacional não, **no limite de malha fina refinada o erro se torna puramente
+irrotacional**. É a forma mais forte da afirmação de `sec:erro-decomposicao`.
+
+**Caveat, agora quantificado.** O resíduo do modo `solenoidal` é **piso de
+amostragem, não defeito**: o campo de Olshanskii amostrado nas faces MAC tem
+divergência discreta $O(h)$ — medida em `1.33e-03` para $N=48$ — que o projetor
+legitimamente remove. §3.1.1 mostra o efeito disso: medida por `leak_ratio`, a
+assimetria entre as parcelas é inflada por $(H/h)^2$.
 
 Corroboração independente: enriquecer a interface derruba o vazamento
 irrotacional em 234× (grau 1 → grau 3, em $N_{dom}=3$, `nloc=16`:

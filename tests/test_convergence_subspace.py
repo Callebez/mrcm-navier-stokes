@@ -102,6 +102,92 @@ def run_subspace_study(comm, modes, Ndoms, nloc, degreeU, degreeP, alpha,
     }
 
 
+def run_hh_ratio_study(comm, modes, Ndoms, ratios, degreeU, degreeP, alpha,
+                       verbose=True) -> dict:
+    """Modo Hh varrido para vários valores de H/h.
+
+    No modo Hh, H/h = nloc é mantido CONSTANTE enquanto a decomposição
+    Ndom×Ndom varre — é o número de incógnitas da malha fina por subdomínio
+    e por direção. Fixá-lo num único valor (16) deixava em aberto se os
+    achados de E11/E12/E13 dependem dele.
+
+    A previsão, se o defeito é da escala H: as taxas em H e a razão entre as
+    parcelas não devem depender de H/h.
+    """
+    curves = {}
+    for r in ratios:
+        for mode in modes:
+            if verbose and comm.rank == 0:
+                banner(f"H/h = {r} — modo {mode}", comm)
+            curves[f"{mode}@{r}"] = convergence_curve_hh(
+                comm, Ndoms, r, degreeU, degreeP, alpha,
+                mode=mode, verbose=verbose)
+
+    return {
+        "hypothesis": {
+            "E12d": "os achados do modo Hh não dependem de H/h: as taxas em H "
+                    "e a razão gradient/solenoidal são invariantes a H/h",
+        },
+        "criterion": {
+            "E12d": "spread das taxas entre valores de H/h < 5%, e a razão "
+                    "gradient/solenoidal varia menos que um fator 2",
+        },
+        "verdict": _verdict_hh_ratio(curves, modes, ratios),
+        "caveats": [
+            "H/h = nloc por construção: H = 1/Ndom e h = 1/(Ndom·nloc)",
+            "o resíduo do modo solenoidal é piso de amostragem O(h); ao "
+            "aumentar H/h com H fixo esse piso cai, então a razão "
+            "gradient/solenoidal CRESCE com H/h por essa razão, e não por "
+            "mudança no defeito",
+        ],
+        "git_commit": _git_commit(),
+        "params": {"modes": list(modes), "Ndoms": list(Ndoms),
+                   "H_over_h": list(ratios),
+                   "degreeU": degreeU, "degreeP": degreeP, "alpha": alpha},
+        "curves": curves,
+    }
+
+
+def _verdict_hh_ratio(curves, modes, ratios) -> dict:
+    por_ratio = {}
+    for r in ratios:
+        entry = {}
+        for mode in modes:
+            c = curves.get(f"{mode}@{r}")
+            if not c:
+                continue
+            rl = c.get("rate_leak")
+            ro = c.get("rate_ortho")
+            entry[mode] = {
+                "rate_leak": rl["rate"] if rl else None,
+                "rate_ortho": ro["rate"] if ro else None,
+                "leak_no_H_mais_grosso": sorted(
+                    c["cases"], key=lambda k: -k["H"])[0]["leak_ratio"],
+                "ortho_no_H_mais_grosso": sorted(
+                    c["cases"], key=lambda k: -k["H"])[0]["ortho_cos"],
+            }
+        if "gradient" in entry and "solenoidal" in entry:
+            g = entry["gradient"]["leak_no_H_mais_grosso"]
+            s = entry["solenoidal"]["leak_no_H_mais_grosso"]
+            entry["razao_grad_sol"] = (g / s) if s else None
+        por_ratio[r] = entry
+
+    taxas = [e[m]["rate_leak"] for e in por_ratio.values()
+             for m in modes if m in e and e[m]["rate_leak"] is not None]
+    spread = ((max(taxas) - min(taxas)) / min(taxas)) if taxas else None
+    razoes = [e["razao_grad_sol"] for e in por_ratio.values()
+              if e.get("razao_grad_sol")]
+    fator = (max(razoes) / min(razoes)) if razoes else None
+    return {
+        "E12d": {
+            "por_H_over_h": por_ratio,
+            "spread_das_taxas": spread,
+            "fator_entre_razoes": fator,
+            "confirmada": bool(spread is not None and spread < 0.05),
+        }
+    }
+
+
 def run_saturation_study(comm, modes, Ndom, nlocs, degreeU, degreeP, alpha,
                          verbose=True) -> dict:
     """H1 — o defeito de ortogonalidade é da escala H, não da escala h.
@@ -421,6 +507,55 @@ def plot_results(results, outdir):
     return path
 
 
+def plot_hh_ratio(results, outdir):
+    """E12d — o modo Hh para vários H/h.
+
+    Cada H/h dá uma família de curvas vs H. Se o defeito é da escala H, as
+    inclinações devem coincidir e as famílias apenas se deslocarem.
+    """
+    plt = apply_plot_style()
+    ratios = results["params"]["H_over_h"]
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.2), sharey=False)
+    tons = np.linspace(0.45, 1.0, len(ratios))
+
+    for ax, metric, lbl in (
+            (axes[0], "leak_ratio", r"leak_ratio $=\|u_h-u_{ex}\|/\|w\|$"),
+            (axes[1], "ortho_cos", r"$|\cos\theta|$ — defeito de ortogonalidade")):
+        for mode in ("gradient", "solenoidal"):
+            _, base = MODE_STYLE.get(mode, ("o-", INK))
+            for t, r in zip(tons, ratios):
+                c = results["curves"].get(f"{mode}@{r}")
+                if not c:
+                    continue
+                cs = sorted(c["cases"], key=lambda k: -k["H"])
+                Hs = np.array([k["H"] for k in cs])
+                ys = np.array([k[metric] for k in cs])
+                if any(y is None for y in ys):
+                    continue
+                ax.loglog(Hs, ys, "o-" if mode == "gradient" else "s--",
+                          color=base, alpha=float(t), markersize=6,
+                          linewidth=1.8,
+                          label=f"{mode}, $H/h$={r}")
+        ax.set_xlabel("$H$ (tamanho do subdomínio)")
+        ax.set_ylabel(lbl)
+        ax.grid(True, which="both", alpha=0.25)
+        ax.legend(frameon=False, fontsize=7.5)
+
+    v = results["verdict"]["E12d"]
+    sp = v.get("spread_das_taxas")
+    fig.suptitle(f"E12d — modo $Hh$ para vários $H/h$  "
+                 f"(spread das taxas: {sp:.1%})" if sp is not None
+                 else "E12d — modo $Hh$ para vários $H/h$")
+    fig.tight_layout()
+
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "e12d_hh_ratio.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ Figura: {path}")
+    return path
+
+
 def plot_saturacao(results, outdir):
     """H1 — o defeito de ortogonalidade não vê h.
 
@@ -561,6 +696,9 @@ def main(argv=None):
                            help="se dado, varre h com H fixo (saturação, H1)"),
             p.add_argument("--degrees", default=None,
                            help="se dado, varre graus de interface (H3)"),
+            p.add_argument("--hh-ratios", dest="hh_ratios", default=None,
+                           help="se dado, roda o modo Hh para vários H/h "
+                                "(= nloc), cada um com a varredura de Ndom"),
         ),
         argv=argv,
     )
@@ -576,7 +714,13 @@ def main(argv=None):
 
     comm = get_comm()
     t0 = time.perf_counter()
-    if args.nlocs:
+    if args.hh_ratios:
+        results = run_hh_ratio_study(comm, modes, Ndoms,
+                                     parse_int_list(args.hh_ratios),
+                                     args.degreeU, args.degreeP, args.alpha,
+                                     verbose=args.verbose)
+        stem, plotter = "e12d_hh_ratio", plot_hh_ratio
+    elif args.nlocs:
         results = run_saturation_study(comm, modes, args.Ndom,
                                        parse_int_list(args.nlocs),
                                        args.degreeU, args.degreeP, args.alpha,
