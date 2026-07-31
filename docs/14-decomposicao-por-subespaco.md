@@ -329,7 +329,7 @@ ruído numérico.
 |---|---|---|---|
 | **H1** | O defeito é da escala $H$, não da escala $h$ | **✓ confirmada** | taxa vs $h$ = **0.0077** (platô), taxa vs $H$ = **1.993** |
 | **H2** | A identidade volume ↔ esqueleto vale no discreto | **✓ confirmada** | resíduo cai $O(h^{0.96})$: `3.73e-01` → `9.83e-02` |
-| **H3** | Enriquecer a interface reduz o defeito | **✓ confirmada** | fator **234×** do grau 1 ao 3 |
+| **H3** | Enriquecer a interface reduz o defeito | **✓ confirmada** | fator **234×** do grau 1 ao 3, invariante a $H/h$ (207.7 / 234.0 / 233.6 em $H/h$ = 8 / 16 / 32) |
 | **H4** | O $\alpha$ ótimo difere do de `err_u` | ver §3.3 (E12c) | $\alpha$ atua só sobre a parcela irrotacional |
 
 #### H1 — o defeito não vê $h$
@@ -398,6 +398,50 @@ extrai conclusão disso aqui.
 **Figura:** `e13_graus.png`. Ambas as curvas são retas em escala semilog, isto é,
 a redução é **geométrica no grau** — cada grau a mais divide o defeito por um
 fator aproximadamente constante (≈15× no modo `gradient`).
+
+### 6.3.1 Réplica da Fig. 6 de Lages, e duas discordâncias
+
+A Fig. 6 do artigo de Camila Lages (*The multiscale projection method for the
+solution of incompressible Navier–Stokes equations*, §3.1) varre $\alpha$ para
+$k=1,\dots,4$ em malha $90^2$ com $3\times3$ subdomínios, medindo o erro **contra
+a discretização não-decomposta** (`err_vs_fine`). O texto faz quatro afirmações
+verificáveis. Reproduzindo o arranjo exato:
+
+| Afirmação do artigo | Veredito | Evidência medida |
+|---|---|---|
+| "solution improves when interface spaces are enriched" | **✓** | $k{=}1{\to}4$: `1.69e-1` → `3.44e-5` (fator 4900) |
+| "a minimum error can occur for some choice of $\alpha$ around unity" | **✓** | argmin $=0.1$ para todo $k$, em todas as métricas de erro |
+| "Errors are better for **large** values of $\alpha$" | **✗ para $k\ge3$** | $k{=}3$: **14×** pior em $\alpha{=}10^4$; $k{=}4$: **153×** pior |
+| "$(P_{H,4},U_{H,4})$ … $\alpha$ will have **less** impact" | **✗ invertido** | $k{=}4$ varia **569×**; $k{=}1$ varia **1.9×** |
+
+As duas primeiras se confirmam sem ressalva. As duas últimas não: a recomendação
+de priorizar $\alpha$ grande vale para $k=1,2$ e **se inverte** para $k\ge3$, e a
+curva $k=4$ é a **mais** sensível a $\alpha$, não a menos.
+
+**O defeito de ortogonalidade dá o mecanismo.** Medido por `ortho_cos`, o mínimo
+está em $\alpha=1$ **exatamente** para $k\ge2$ — "around unity", como o artigo
+diz —, enquanto o erro de velocidade é minimizado em $\alpha=0.1$:
+
+| $k$ | argmin via `err_vs_fine` | argmin via `ortho_cos` |
+|---|---|---|
+| 1 | 0.1 | 0.1 |
+| 2 | 0.1 | **1** |
+| 3 | 0.1 | **1** |
+| 4 | 0.1 | **1** |
+
+São **ótimos diferentes**: $\alpha=1$ minimiza a *perda de ortogonalidade*,
+$\alpha=0.1$ minimiza o *erro de velocidade*. O $\alpha=1$ recomendado pelo
+capítulo do MRCM é, portanto, ótimo para a propriedade que a decomposição
+quebra — não para a acurácia da velocidade.
+
+**Isto refina H4.** A hipótese ("o $\alpha$ que minimiza `ortho_cos` difere do
+que minimiza o erro") foi dada como refutada em §3.3, medida em $k=1$. Ela é
+**falsa em $k=1$ e verdadeira em $k\ge2$**: o desacoplamento entre os dois ótimos
+aparece só quando a interface é enriquecida.
+
+**Figura:** `results_alpha/alpha_hh_fig6.png`, dois painéis — o deslocamento das
+estrelas (mínimos) entre eles *é* o achado. As quatro afirmações do artigo estão
+codificadas como testes em `tests/test_alpha_hh.py`.
 
 ### 6.4 A limitação declarada
 

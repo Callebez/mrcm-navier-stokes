@@ -109,20 +109,95 @@ def _run_one_case(comm, w1, w2, uf1, uf2, u1, u2,
                      basis_kind=basis_kind,
                      mixed_family="BDM", mixed_order=0,
                      executor_kind="sequential")
+    from mprm.benchmarks.hh import (hh_ortho_defect, hh_assemble_psi,
+                                    hh_ortho_skeleton, _l2_mac)
+
     t0 = time.perf_counter()
     projector = MPrMProjector(cfg, dt, comm=comm)
     downscaler = MACDownscaler(cfg, dt)
+    downscaler.keep_potential = True
     uh1, uh2 = mprm_projection_step(w1, w2, projector, downscaler)
     wall = time.perf_counter() - t0
+
+    # eq:ErroOrtogonalidade — a métrica que não depende de solução de
+    # referência. O artigo compara contra a discretização não-decomposta
+    # (err_vs_fine); esta mede a inconsistência interna da solução.
+    ortho_abs, ortho_cos = hh_ortho_defect(uh1, uh2, w1 - uh1, w2 - uh2, h)
+    psi = hh_assemble_psi(downscaler, projector, Ndom, nloc)
+    ortho_skel = hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, dt)
+    scale = max(abs(ortho_abs), abs(ortho_skel))
 
     return {
         "k": k, "alpha": float(alpha),
         "err_vs_fine": rel_err(uh1, uh2, uf1, uf2),
         "err_vs_exact": rel_err(uh1, uh2, u1, u2),
+        "leak_ratio": _l2_mac(uh1 - u1, uh2 - u2, h) / _l2_mac(w1, w2, h),
+        "ortho_cos": None if ortho_cos is None else abs(ortho_cos),
+        "ortho_skel": ortho_skel,
+        "ortho_identity_rel": (None if scale == 0.0
+                               else abs(ortho_abs - ortho_skel) / scale),
         "divmax": float(np.abs(mac_divergence(uh1, uh2, h, h)).max()),
         "defect": float(downscaler.last_defect),
         "wall_s": wall,
     }
+
+
+# ===========================================================================
+# As afirmações do artigo sobre a Fig. 6, como testes
+# ===========================================================================
+# Lages, §3.1, texto da Fig. 6 — quatro afirmações verificáveis:
+#   (a) "solution improves when interface spaces are enriched"
+#   (b) "a minimum error can occur for some choice of α around unity"
+#   (c) "Errors are better for large values of α"
+#   (d) "(P_H,4,U_H,4) ... the choice of α will have less impact"
+# Medidas em malha 90², 3×3 subdomínios — o arranjo da figura.
+
+def _fig6_grid(alphas=(1e-2, 1e-1, 1.0, 1e2, 1e4), ks=(1, 4),
+               Ndom=3, nloc=30):
+    """Subconjunto do grid da Fig. 6, barato o bastante para pytest."""
+    from mprm.benchmarks.convergence import _run_one_hh_level
+    comm = get_comm()
+    out = []
+    for k in ks:
+        for a in alphas:
+            c = _run_one_hh_level(comm, Ndom, nloc, k, k, a,
+                                  "legendre_P", 1.0, mode="mixed")
+            c["k"], c["alpha"] = k, a
+            out.append(c)
+    return out
+
+
+def test_fig6a_enriquecer_a_interface_melhora():
+    """(a) ✓ — a afirmação do artigo que se confirma sem ressalva."""
+    g = _fig6_grid(alphas=(1e-1,), ks=(1, 2, 3, 4))
+    errs = [c["err_vs_fine"] for c in sorted(g, key=lambda c: c["k"])]
+    assert all(b < a for a, b in zip(errs, errs[1:])), errs
+
+
+def test_fig6c_erro_NAO_melhora_com_alpha_grande_em_k_alto():
+    """(c) ✗ — refuta 'errors are better for large values of α'.
+
+    Vale para k=1, inverte-se para k=4: em α=1e4 o erro é ordens de
+    grandeza PIOR que em α pequeno. Achado contra o artigo, registrado.
+    """
+    g = _fig6_grid(alphas=(1e-2, 1e4), ks=(4,))
+    pequeno = [c for c in g if c["alpha"] == 1e-2][0]["err_vs_fine"]
+    grande = [c for c in g if c["alpha"] == 1e4][0]["err_vs_fine"]
+    assert grande > 10.0 * pequeno, (
+        f"α grande deveria ser MUITO pior em k=4: "
+        f"α=1e-2 → {pequeno:.3e}, α=1e4 → {grande:.3e}")
+
+
+def test_fig6d_k4_e_a_mais_sensivel_a_alpha_nao_a_menos():
+    """(d) ✗ — inverte 'α will have less impact' para (P_H,4,U_H,4)."""
+    g = _fig6_grid(alphas=(1e-2, 1e-1, 1.0, 1e2, 1e4), ks=(1, 4))
+    spread = {}
+    for k in (1, 4):
+        v = [c["err_vs_fine"] for c in g if c["k"] == k]
+        spread[k] = max(v) / min(v)
+    assert spread[4] > 10.0 * spread[1], (
+        f"k=4 deveria ser a MAIS sensível: k=1 varia {spread[1]:.1f}×, "
+        f"k=4 varia {spread[4]:.1f}×")
 
 
 # ===========================================================================
@@ -135,24 +210,42 @@ def plot_results(results: dict, outdir: str) -> str:
     alphas = results["meta"]["alphas"]
     ks = results["meta"]["ks"]
 
-    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
     # deslocamentos verticais dos rótulos diretos (curvas k=2..4 convergem
     # no limite MHM — sem o dodge os rótulos colidem)
     dodge = {1: 0, 2: 10, 3: 0, 4: -11}
-    for k in ks:
-        errs = [c["err_vs_fine"] for c in results["cases"] if c["k"] == k]
-        ax.loglog(alphas, errs, "-", marker=MARKERS[k], markersize=7,
-                  linewidth=2, color=COLORS[k],
-                  label=f"$(P_{{H,{k}}},\\,U_{{H,{k}}})$")
-        ax.annotate(f"k={k}", xy=(alphas[-1], errs[-1]),
-                    xytext=(7, dodge.get(k, 0)), textcoords="offset points",
-                    va="center", fontsize=10, color=INK)
-    ax.set_xlabel(r"$\alpha$ (parâmetro de Robin)")
-    ax.set_ylabel(r"$\|u_h - u_{\rm fino}\|_2\,/\,\|u_{\rm fino}\|_2$")
-    ax.set_title("Decomposição HH modificada: erro vs α — réplica da Fig. 6 "
+
+    for ax, key, ylbl, titulo in (
+            (axes[0], "err_vs_fine",
+             r"$\|u_h - u_{\rm fino}\|_2\,/\,\|u_{\rm fino}\|_2$",
+             "réplica da Fig. 6 — erro vs a discretização não-decomposta"),
+            (axes[1], "ortho_cos",
+             r"$|\cos\theta|$ — defeito de ortogonalidade",
+             "eq:ErroOrtogonalidade — sem solução de referência")):
+        for k in ks:
+            errs = [c[key] for c in results["cases"] if c["k"] == k]
+            if any(e is None for e in errs):
+                continue
+            ax.loglog(alphas, errs, "-", marker=MARKERS[k], markersize=7,
+                      linewidth=2, color=COLORS[k],
+                      label=f"$(P_{{H,{k}}},\\,U_{{H,{k}}})$")
+            ax.annotate(f"k={k}", xy=(alphas[-1], errs[-1]),
+                        xytext=(7, dodge.get(k, 0)),
+                        textcoords="offset points",
+                        va="center", fontsize=10, color=INK)
+            i = int(np.argmin(errs))
+            ax.plot(alphas[i], errs[i], "*", color=COLORS[k], markersize=15,
+                    markeredgecolor=INK, markeredgewidth=0.6, zorder=6)
+        ax.set_xlabel(r"$\alpha$ (parâmetro de Robin)")
+        ax.set_ylabel(ylbl)
+        ax.set_title(titulo, fontsize=10)
+        ax.grid(True, which="both", alpha=0.25)
+        ax.legend(frameon=False, loc="best", fontsize=8)
+
+    fig.suptitle("Decomposição HH modificada vs α — Lages Fig. 6 "
                  f"(malha {results['meta']['N']}², "
-                 f"{results['meta']['Ndom']}×{results['meta']['Ndom']} subdomínios)")
-    ax.legend(frameon=False, loc="best")
+                 f"{results['meta']['Ndom']}×{results['meta']['Ndom']} "
+                 "subdomínios) · ★ = mínimo")
     fig.tight_layout()
     return save_figure(fig, outdir, "alpha_hh_fig6.png")
 
