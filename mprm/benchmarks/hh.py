@@ -97,6 +97,76 @@ def hh_build_w(N):
     return hh_build_w_mode(N, mode="mixed")
 
 
+def _l2_mac(a1, a2, h):
+    """Norma ℓ² discreta na malha MAC, ponderada por h²."""
+    return float(np.sqrt(h * h * (np.sum(a1 ** 2) + np.sum(a2 ** 2))))
+
+
+def _make_pipeline(Ndom, nloc, degreeU, degreeP, alpha, dt, comm=None):
+    """Monta o par (projetor MRCM, downscaler MAC) do benchmark HH."""
+    if comm is None:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+    cfg = MRCMConfig(Ndomx=Ndom, Ndomy=Ndom, nlocx=nloc, nlocy=nloc,
+                     degreeU=degreeU, degreeP=degreeP, alpha=float(alpha),
+                     mixed_family="BDM", mixed_order=0,
+                     executor_kind="sequential")
+    return MPrMProjector(cfg, dt, comm=comm), MACDownscaler(cfg, dt)
+
+
+def _project_once(w1, w2, Ndom=3, nloc=30, degreeU=1, degreeP=1, alpha=1.0,
+                  dt=1.0, comm=None, projector=None, downscaler=None):
+    """Um disparo do pipeline MPrM: projeta w e devolve (uh1, uh2).
+
+    Aceita um par (projector, downscaler) já montado — o custo offline não
+    depende de w, e reusá-lo é o que torna barato aferir a linearidade.
+    """
+    if projector is None or downscaler is None:
+        projector, downscaler = _make_pipeline(Ndom, nloc, degreeU, degreeP,
+                                               alpha, dt, comm)
+    return mprm_projection_step(w1, w2, projector, downscaler)
+
+
+def hh_benchmark_mode(Ndom=3, nloc=30, degreeU=1, degreeP=1, alpha=1.0,
+                      mode="mixed", comm=None):
+    """Decomposição HH por subespaço via pipeline MPrM completo na malha MAC.
+
+    Amostra a entrada segundo `mode` (ver hh_build_w_mode), projeta com o
+    MRCM (K=1, δt=1), aplica o downscaling e compara u_h = w − ṽ com a
+    parcela solenoidal exata da entrada.
+
+    Métricas:
+      err_u      — erro RELATIVO à parcela solenoidal exata. Indefinido no
+                   modo "gradient", em que o denominador é zero: devolve None.
+      err_abs    — ‖u_h − u_ex‖₂, sempre definido, em ℓ² ponderada por h.
+      leak_ratio — ‖u_h − u_ex‖₂ / ‖w‖₂, a fração da energia da ENTRADA que
+                   aparece como erro. É a métrica comparável entre modos, e
+                   é a que não depende da amplitude.
+    """
+    N = Ndom * nloc
+    h = 1.0 / N
+    dt = 1.0
+
+    w1, w2, u1, u2 = hh_build_w_mode(N, mode=mode)
+    projector, downscaler = _make_pipeline(Ndom, nloc, degreeU, degreeP,
+                                           alpha, dt, comm)
+    uh1, uh2 = _project_once(w1, w2, projector=projector,
+                             downscaler=downscaler)
+
+    err_abs = _l2_mac(uh1 - u1, uh2 - u2, h)
+    den = _l2_mac(u1, u2, h)
+    wnorm = _l2_mac(w1, w2, h)
+    return {
+        "err_u": None if den == 0.0 else err_abs / den,
+        "err_abs": err_abs,
+        "leak_ratio": None if wnorm == 0.0 else err_abs / wnorm,
+        "mode": mode,
+        "divmax": float(np.abs(mac_divergence(uh1, uh2, h, h)).max()),
+        "defect": downscaler.last_defect,
+        "u": (uh1, uh2), "u_exact": (u1, u2), "w": (w1, w2), "N": N,
+    }
+
+
 def hh_benchmark_mac(Ndom=3, nloc=30, degreeU=1, degreeP=1, alpha=1.0,
                      comm=None):
     """Decomposição HH modificada via pipeline MPrM completo na malha MAC.
@@ -104,29 +174,12 @@ def hh_benchmark_mac(Ndom=3, nloc=30, degreeU=1, degreeP=1, alpha=1.0,
     Amostra w = u + ∇p̃ nas faces MAC, projeta com o MRCM (K=1, δt=1),
     aplica o downscaling e compara u_h = w − ṽ com o u analítico.
     Retorna dict(err_u, divmax, defect).
+
+    Delega a hh_benchmark_mode(mode="mixed"): um único caminho de código, de
+    modo que a retrocompatibilidade seja estrutural e não uma cópia a manter
+    em sincronia. err_u é bit-idêntico porque a ponderação por h² se cancela
+    na razão entre numerador e denominador.
     """
-    if comm is None:
-        from mpi4py import MPI
-        comm = MPI.COMM_WORLD
-    N = Ndom * nloc
-    h = 1.0 / N
-    dt = 1.0
-
-    w1, w2, u1, u2 = hh_build_w(N)
-
-    cfg = MRCMConfig(Ndomx=Ndom, Ndomy=Ndom, nlocx=nloc, nlocy=nloc,
-                     degreeU=degreeU, degreeP=degreeP, alpha=alpha,
-                     mixed_family="BDM", mixed_order=0,
-                     executor_kind="sequential")
-    projector = MPrMProjector(cfg, dt, comm=comm)
-    downscaler = MACDownscaler(cfg, dt)
-    uh1, uh2 = mprm_projection_step(w1, w2, projector, downscaler)
-
-    num = np.sum((uh1 - u1) ** 2) + np.sum((uh2 - u2) ** 2)
-    den = np.sum(u1 ** 2) + np.sum(u2 ** 2)
-    return {
-        "err_u": float(np.sqrt(num / den)),
-        "divmax": float(np.abs(mac_divergence(uh1, uh2, h, h)).max()),
-        "defect": downscaler.last_defect,
-        "u": (uh1, uh2), "u_exact": (u1, u2), "w": (w1, w2), "N": N,
-    }
+    return hh_benchmark_mode(Ndom=Ndom, nloc=nloc, degreeU=degreeU,
+                             degreeP=degreeP, alpha=alpha, mode="mixed",
+                             comm=comm)
