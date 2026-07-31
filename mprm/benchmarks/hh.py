@@ -41,12 +41,24 @@ def hh_gradp_np(x, y):
     return gx, gy
 
 
-def hh_build_w(N):
-    """Amostra o campo do benchmark HH nas faces MAC (malha N×N).
+_MODES = ("mixed", "gradient", "solenoidal")
 
-    Retorna (w1, w2, u1, u2): w = u + ∇p̃ e o campo solenoidal analítico u
-    nas faces verticais/horizontais, com w·n = 0 imposto no contorno.
+
+def hh_build_w_mode(N, mode="mixed"):
+    """Amostra o campo de entrada da decomposição, por subespaço.
+
+    mode="mixed"      : w = u + grad p̃   (construção original)
+    mode="gradient"   : w = grad p̃       (parcela solenoidal exata = 0)
+    mode="solenoidal" : w = u            (parcela irrotacional exata = 0)
+
+    Devolve (w1, w2, u1_ex, u2_ex), em que (u1_ex, u2_ex) é a parcela
+    SOLENOIDAL EXATA da entrada — o alvo da comparação em qualquer modo.
+
+    No modo "gradient" a resposta exata é u = 0, de modo que todo valor não
+    nulo devolvido pelo pipeline é erro puro, sem solução de referência.
     """
+    if mode not in _MODES:
+        raise ValueError(f"mode inválido: {mode!r} (use um de {_MODES})")
     h = 1.0 / N
     xf = np.linspace(0.0, 1.0, N + 1)      # faces verticais
     yc = (np.arange(N) + 0.5) * h
@@ -55,14 +67,34 @@ def hh_build_w(N):
     yf = np.linspace(0.0, 1.0, N + 1)
     Xv, Yv = np.meshgrid(xc, yf, indexing="ij")
 
-    u1, _ = olshanskii_u_np(Xu, Yu)
-    _, u2 = olshanskii_u_np(Xv, Yv)
-    g1, _ = hh_gradp_np(Xu, Yu)
-    _, g2 = hh_gradp_np(Xv, Yv)
+    if mode == "gradient":
+        u1, u2 = np.zeros_like(Xu), np.zeros_like(Xv)
+    else:
+        u1, _ = olshanskii_u_np(Xu, Yu)
+        _, u2 = olshanskii_u_np(Xv, Yv)
+
+    if mode == "solenoidal":
+        g1, g2 = np.zeros_like(Xu), np.zeros_like(Xv)
+    else:
+        g1, _ = hh_gradp_np(Xu, Yu)
+        _, g2 = hh_gradp_np(Xv, Yv)
+
     w1, w2 = u1 + g1, u2 + g2
     w1[0, :] = w1[-1, :] = 0.0             # w·n = 0 (exato para p̃; u é tangente)
     w2[:, 0] = w2[:, -1] = 0.0
     return w1, w2, u1, u2
+
+
+def hh_build_w(N):
+    """Amostra o campo do benchmark HH nas faces MAC (malha N×N).
+
+    Retorna (w1, w2, u1, u2): w = u + ∇p̃ e o campo solenoidal analítico u
+    nas faces verticais/horizontais, com w·n = 0 imposto no contorno.
+
+    Delega a hh_build_w_mode(N, "mixed"): um único caminho de código, de modo
+    que a retrocompatibilidade seja estrutural e não uma cópia a sincronizar.
+    """
+    return hh_build_w_mode(N, mode="mixed")
 
 
 def hh_benchmark_mac(Ndom=3, nloc=30, degreeU=1, degreeP=1, alpha=1.0,
