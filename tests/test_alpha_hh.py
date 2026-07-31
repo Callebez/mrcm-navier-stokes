@@ -189,15 +189,41 @@ def test_fig6c_erro_NAO_melhora_com_alpha_grande_em_k_alto():
 
 
 def test_fig6d_k4_e_a_mais_sensivel_a_alpha_nao_a_menos():
-    """(d) ✗ — inverte 'α will have less impact' para (P_H,4,U_H,4)."""
+    """(d) ✗ — inverte 'α will have less impact' para (P_H,4,U_H,4).
+
+    Mede por err_vs_exact, e NÃO por err_vs_fine como o artigo: a referência
+    fina tem erro de discretização 9.34e-05 em N=90, e 3 dos 9 pontos da
+    curva k=4 caem abaixo disso — ali err_vs_fine mede a diferença entre dois
+    erros e cava um mínimo artificialmente fundo (569× em vez de 197×).
+    """
     g = _fig6_grid(alphas=(1e-2, 1e-1, 1.0, 1e2, 1e4), ks=(1, 4))
     spread = {}
     for k in (1, 4):
-        v = [c["err_vs_fine"] for c in g if c["k"] == k]
+        v = [c["err_vs_exact"] for c in g if c["k"] == k]
         spread[k] = max(v) / min(v)
     assert spread[4] > 10.0 * spread[1], (
         f"k=4 deveria ser a MAIS sensível: k=1 varia {spread[1]:.1f}×, "
         f"k=4 varia {spread[4]:.1f}×")
+
+
+def test_referencia_fina_e_resolvida_por_LU_direta():
+    """A precisão algébrica da referência é de máquina — não é o limitante.
+
+    FineProjector usa splu (LU esparsa direta), sem tolerância. O limitante
+    é o erro de DISCRETIZAÇÃO da malha fina, medido aqui: é ele que põe piso
+    em err_vs_fine, e é por isso que o teste acima usa err_vs_exact.
+    """
+    from mprm.benchmarks.hh import hh_build_w_mode, _l2_mac
+    from mprm.flow import FineProjector
+
+    N = 90
+    h = 1.0 / N
+    w1, w2, u1, u2 = hh_build_w_mode(N, mode="mixed")
+    uf1, uf2 = FineProjector(N, N, h, h, 1.0).step(w1, w2)
+
+    piso = _l2_mac(uf1 - u1, uf2 - u2, h) / _l2_mac(u1, u2, h)
+    assert 5e-5 < piso < 2e-4, f"piso da referência fina mudou: {piso:.3e}"
+    assert np.abs(mac_divergence(uf1, uf2, h, h)).max() < 1e-8
 
 
 # ===========================================================================

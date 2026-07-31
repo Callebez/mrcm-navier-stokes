@@ -412,7 +412,7 @@ verificáveis. Reproduzindo o arranjo exato:
 | "solution improves when interface spaces are enriched" | **✓** | $k{=}1{\to}4$: `1.69e-1` → `3.44e-5` (fator 4900) |
 | "a minimum error can occur for some choice of $\alpha$ around unity" | **✓** | argmin $=0.1$ para todo $k$, em todas as métricas de erro |
 | "Errors are better for **large** values of $\alpha$" | **✗ para $k\ge3$** | $k{=}3$: **14×** pior em $\alpha{=}10^4$; $k{=}4$: **153×** pior |
-| "$(P_{H,4},U_{H,4})$ … $\alpha$ will have **less** impact" | **✗ invertido** | $k{=}4$ varia **569×**; $k{=}1$ varia **1.9×** |
+| "$(P_{H,4},U_{H,4})$ … $\alpha$ will have **less** impact" | **✗ invertido** | $k{=}4$ varia **197×**; $k{=}1$ varia **1.9×** (ver §6.3.2 — o 569× de `err_vs_fine` está inflado) |
 
 As duas primeiras se confirmam sem ressalva. As duas últimas não: a recomendação
 de priorizar $\alpha$ grande vale para $k=1,2$ e **se inverte** para $k\ge3$, e a
@@ -442,6 +442,68 @@ aparece só quando a interface é enriquecida.
 **Figura:** `results_alpha/alpha_hh_fig6.png`, dois painéis — o deslocamento das
 estrelas (mínimos) entre eles *é* o achado. As quatro afirmações do artigo estão
 codificadas como testes em `tests/test_alpha_hh.py`.
+
+### 6.3.2 Com que precisão a solução fina foi calculada — e por que isso limita a Fig. 6
+
+A pergunta tem duas respostas, e a que importa não é a algébrica.
+
+**Precisão algébrica: de máquina.** `FineProjector` (`mprm/flow.py:97`) monta o
+Poisson MAC de 5 pontos com Neumann homogêneo e pino de pressão, e o resolve com
+`scipy.sparse.linalg.splu` — **fatoração LU esparsa direta**, não iterativa. Não
+há tolerância a ajustar. Resíduo medido em $N=90$:
+$\|Ax-b\|/\|b\| = 4.9\times10^{-13}$. A divergência discreta do campo devolvido
+é `2.3e-09`.
+
+**Precisão de discretização: $9.34\times10^{-5}$.** Este é o número que limita o
+experimento. A referência fina é uma discretização de volumes finitos em malha
+$90^2$ — ela tem erro próprio $O(h^2)$ contra o campo analítico:
+
+$$\frac{\|\bm u_{\rm fino}-\bm u_{\rm exato}\|}{\|\bm u_{\rm exato}\|} = 9.34\times10^{-5}.$$
+
+**Consequência: `err_vs_fine` não resolve nada abaixo disso.** Ao comparar a
+solução multiescala com a fina, mede-se a diferença entre duas soluções que
+carregam, cada uma, seu próprio erro. Quando a multiescala fica tão boa quanto a
+fina, o número medido passa a ser a diferença de dois erros — que pode cancelar
+parcialmente e produzir um mínimo artificialmente fundo.
+
+Quantos pontos da Fig. 6 caem nessa faixa:
+
+| $k$ | pontos abaixo do piso | $\alpha$ afetados |
+|---|---|---|
+| 1 | 0 / 9 | — |
+| 2 | 0 / 9 | — |
+| 3 | 0 / 9 | — |
+| **4** | **3 / 9** | 0.01, 0.1, 1.0 |
+
+São exatamente os pontos da **região do mínimo** de $k=4$ — e $k=4$ é a curva
+sobre a qual o artigo faz a afirmação (d).
+
+**Isto corrige um número meu.** O spread de $k=4$ que reportei como **569×**
+vinha de `err_vs_fine`, com o mínimo abaixo do piso. Medido contra o campo
+analítico, que não tem esse problema, o spread é **197×**:
+
+| $k$ | spread via `err_vs_fine` | spread via `err_vs_exact` |
+|---|---|---|
+| 1 | 1.9× | 1.9× |
+| 4 | 568.8× | **196.8×** |
+
+Em $k=1$ as duas métricas coincidem, como esperado — ali a solução está muito
+longe do piso. A refutação da afirmação (d) **sobrevive**: 197× contra 1.9×
+mantém $k=4$ como a curva ~100× mais sensível a $\alpha$, não a menos. Mas o
+número honesto é 197×.
+
+**Ressalva sobre a comparação com o artigo.** O confronto de §6.3.1 é com o
+**texto** que descreve a Fig. 6, não com os dados plotados nela — a figura em si
+não está disponível na cópia em markdown das referências. Também não se conhece
+o erro de discretização da referência fina usada por Lages. Se aquela referência
+tivesse piso mais alto que a nossa, a curva $k=4$ apareceria comprimida perto do
+mínimo, o que seria compatível com a descrição "$\alpha$ will have less impact".
+Isso é hipótese, não medição, e fica registrada como tal.
+
+**Recomendação prática.** Para $k\ge3$, use `err_vs_exact` — ou, melhor,
+`ortho_cos`, que não precisa de referência nenhuma (§6.1) e por isso não tem
+piso. Foi o mesmo problema que a memória do projeto já registrava sob a forma
+"`err_vs_fine` infla as taxas em $k=3,4$".
 
 ### 6.4 A limitação declarada
 
