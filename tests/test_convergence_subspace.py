@@ -35,7 +35,9 @@ from common import (get_comm, apply_plot_style, banner, save_json,
                     INK, COLORS, DEFAULT_OUTDIR)
 from params import (CommonParams, parse_args, parse_int_list,
                     parse_float_list)
-from mprm.benchmarks.convergence import convergence_curve_hh
+from mprm.benchmarks.convergence import (convergence_curve_hh,
+                                         convergence_curve_h,
+                                         convergence_curve_p)
 
 OUTDIR = os.path.join(DEFAULT_OUTDIR, "convergence_olshanskii")
 DEFAULT_NDOMS = "2,4,8,16"
@@ -98,6 +100,104 @@ def run_subspace_study(comm, modes, Ndoms, nloc, degreeU, degreeP, alpha,
                    "degreeU": degreeU, "degreeP": degreeP, "alpha": alpha},
         "curves": curves,
     }
+
+
+def run_saturation_study(comm, modes, Ndom, nlocs, degreeU, degreeP, alpha,
+                         verbose=True) -> dict:
+    """H1 — o defeito de ortogonalidade é da escala H, não da escala h.
+
+    Com H fixo (Ndom fixo) e h→0, a previsão é que `ortho_cos` SATURE num
+    platô não nulo. Se ele cair com h, o erro é de discretização e não da
+    decomposição, e isso contradiz sec:erro-decomposicao.
+    """
+    curves = {}
+    for mode in modes:
+        if verbose and comm.rank == 0:
+            banner(f"saturação em h — modo {mode}", comm)
+        curves[mode] = convergence_curve_h(comm, Ndom, nlocs, degreeU,
+                                           degreeP, alpha, mode=mode,
+                                           verbose=verbose)
+    return {
+        "hypothesis": {
+            "H1": "ortho_cos satura em platô não nulo sob refino de h com "
+                  "H fixo — o defeito é da escala H, não da escala h",
+        },
+        "criterion": {
+            "H1": "|rate_ortho vs h| < 0.2 e ortho_cos > 1e-6 no h mais fino",
+        },
+        "verdict": _verdict_saturacao(curves),
+        "caveats": [
+            "ortho_cos no modo solenoidal é razão entre duas quantidades "
+            "pequenas (u_h ≈ w, logo ṽ ≈ 0) e pode se comportar de forma "
+            "errática; o modo de referência para H1 é gradient",
+        ],
+        "git_commit": _git_commit(),
+        "params": {"modes": list(modes), "Ndom": Ndom, "nlocs": list(nlocs),
+                   "degreeU": degreeU, "degreeP": degreeP, "alpha": alpha},
+        "curves": curves,
+    }
+
+
+def _verdict_saturacao(curves) -> dict:
+    out = {}
+    for mode, c in curves.items():
+        r = c.get("rate_ortho")
+        cases = sorted(c["cases"], key=lambda k: k["h"])
+        fino = cases[0]["ortho_cos"] if cases else None
+        taxa = r["rate"] if r else None
+        out[mode] = {
+            "rate_ortho_vs_h": taxa,
+            "ortho_cos_no_h_mais_fino": fino,
+            "satura": bool(taxa is not None and abs(taxa) < 0.2
+                           and fino is not None and fino > 1e-6),
+        }
+    ref = out.get("gradient", {})
+    return {"H1": {"por_modo": out,
+                   "confirmada": bool(ref.get("satura"))}}
+
+
+def run_degree_study(comm, modes, Ndom, nloc, ks, alpha,
+                     verbose=True) -> dict:
+    """H3 — enriquecer a interface reduz o defeito de ortogonalidade."""
+    curves = {}
+    for mode in modes:
+        if verbose and comm.rank == 0:
+            banner(f"graus de interface — modo {mode}", comm)
+        curves[mode] = convergence_curve_p(comm, Ndom, nloc, ks, alpha,
+                                           mode=mode, verbose=verbose)
+    return {
+        "hypothesis": {
+            "H3": "enriquecer a interface (degreeU=degreeP) reduz ortho_cos",
+        },
+        "criterion": {
+            "H3": "ortho_cos no maior grau < ortho_cos no menor grau",
+        },
+        "verdict": _verdict_graus(curves),
+        "caveats": [
+            "convergence_curve_p não ajusta taxa (grau não é escala de "
+            "comprimento); o veredito compara valores extremos",
+        ],
+        "git_commit": _git_commit(),
+        "params": {"modes": list(modes), "Ndom": Ndom, "nloc": nloc,
+                   "ks": list(ks), "alpha": alpha},
+        "curves": curves,
+    }
+
+
+def _verdict_graus(curves) -> dict:
+    out = {}
+    for mode, c in curves.items():
+        cases = sorted(c["cases"], key=lambda k: k.get("degreeU", 0))
+        vals = [k["ortho_cos"] for k in cases]
+        out[mode] = {
+            "graus": [k.get("degreeU") for k in cases],
+            "ortho_cos": vals,
+            "fator_de_reducao": (vals[0] / vals[-1])
+            if vals and vals[-1] else None,
+            "reduz": bool(len(vals) >= 2 and vals[-1] < vals[0]),
+        }
+    ref = out.get("gradient", {})
+    return {"H3": {"por_modo": out, "confirmada": bool(ref.get("reduz"))}}
 
 
 def run_alpha_study(comm, modes, alphas, Ndom, nloc, degreeU, degreeP,
@@ -364,6 +464,10 @@ def main(argv=None):
             p.add_argument("--alphas", default=None,
                            help="se dado, varre alpha em vez de Ndom "
                                 "(malha e graus fixos)"),
+            p.add_argument("--nlocs", default=None,
+                           help="se dado, varre h com H fixo (saturação, H1)"),
+            p.add_argument("--degrees", default=None,
+                           help="se dado, varre graus de interface (H3)"),
         ),
         argv=argv,
     )
@@ -379,7 +483,18 @@ def main(argv=None):
 
     comm = get_comm()
     t0 = time.perf_counter()
-    if alphas:
+    if args.nlocs:
+        results = run_saturation_study(comm, modes, args.Ndom,
+                                       parse_int_list(args.nlocs),
+                                       args.degreeU, args.degreeP, args.alpha,
+                                       verbose=args.verbose)
+        stem, plotter = "e13_saturacao", None
+    elif args.degrees:
+        results = run_degree_study(comm, modes, args.Ndom, nloc,
+                                   parse_int_list(args.degrees), args.alpha,
+                                   verbose=args.verbose)
+        stem, plotter = "e13_graus", None
+    elif alphas:
         results = run_alpha_study(comm, modes, alphas, args.Ndom, nloc,
                                   args.degreeU, args.degreeP,
                                   verbose=args.verbose)
@@ -394,10 +509,11 @@ def main(argv=None):
     if comm.rank == 0:
         os.makedirs(OUTDIR, exist_ok=True)
         save_json(results, OUTDIR, f"{stem}.json", comm)
-        try:
-            plotter(results, OUTDIR)
-        except Exception as e:
-            print(f"  ⚠ Plot failed: {e}")
+        if plotter is not None:
+            try:
+                plotter(results, OUTDIR)
+            except Exception as e:
+                print(f"  ⚠ Plot failed: {e}")
 
         banner("vereditos", comm)
         for key, v in results["verdict"].items():

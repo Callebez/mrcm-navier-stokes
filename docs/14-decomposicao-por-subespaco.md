@@ -206,6 +206,164 @@ veredito.
 | Marcha temporal, cavidade, von Kármán | Este estudo segue o caminho do Olshanskii, de disparo único |
 | Newton/Picard para NS estacionário | Exigiria solver monolítico inexistente |
 
-A medida **direta** do defeito de ortogonalidade — a quantidade
-`eq:ErroOrtogonalidade` que `sec:erro-decomposicao` identifica como a sede do
-erro — é objeto da Fase 4 do plano, e tem seção própria acrescentada adiante.
+---
+
+## 6. O defeito de ortogonalidade
+
+As seções anteriores medem o erro por **subespaço**. Esta mede a quantidade que
+`sec:erro-decomposicao` identifica como **a** sede do erro, e que
+`Resultados.tex` promete medir *diretamente*:
+
+$$\int_\Omega \bm u_h\cdot\tilde{\bm v}_h \;=\; \int_\Gamma \big[\!\big[\,\psi_h\,(\bm u_h\cdot\bhat n)\,\big]\!\big].$$
+
+Nenhuma execução anterior havia calculado esse número.
+
+### 6.1 Por que ele é melhor instrumento que `err_u` e `leak_ratio`
+
+1. **É auto-contido.** Não requer solução exata: é uma inconsistência *interna*
+   da solução calculada. `err_u` e `leak_ratio` precisam do campo analítico; este
+   não. É o que o torna aplicável à cavidade, ao obstáculo e à decomposição por
+   *quadtree*, que não têm solução manufaturada.
+2. **É adimensional por normalização.** $\cos\theta = \langle\bm u_h,\tilde{\bm v}_h\rangle/(\|\bm u_h\|\|\tilde{\bm v}_h\|)$
+   é o cosseno do ângulo entre as parcelas. Imune à amplitude — não por uma razão
+   entre erro e referência, mas por construção.
+3. **Tem duas leituras independentes.** Volume à esquerda, esqueleto à direita.
+   Confrontá-las verifica, no discreto, a própria derivação do capítulo.
+
+Com a regularização, $\bm u_h\cdot\bhat n$ é unívoco no esqueleto e sai do salto:
+resta $\int_\Gamma (\bm u_h\cdot\bhat n)\,[\![\psi_h]\!]$ — o fluxo normal vezes o
+**salto de pressão**. A regularização conserta o fluxo, não a pressão. É por isso
+que o defeito sobrevive a ela.
+
+### 6.2 A demonstração central: o esqueleto é a causa
+
+$N_{dom}=3$, `nloc=16`, $\alpha=1$:
+
+| Arranjo | `ortho_cos` |
+|---|---|
+| **Malha fina global** (1 subdomínio, **sem esqueleto**) | `+3.46e-13` |
+| Multiescala, `gradient` | `−1.995e-02` |
+| Multiescala, `mixed` | `−4.86e-03` |
+| Multiescala, `solenoidal` | `−2.53e-03` |
+
+Na malha fina, a decomposição de Helmholtz–Hodge discreta é ortogonal **até a
+precisão da máquina**. Introduzir o esqueleto faz o defeito saltar **dez ordens
+de grandeza**. Mesma malha, mesmo campo, mesma quadratura — muda apenas a
+presença do esqueleto.
+
+Isso é mais específico que "o erro se aloja na parcela irrotacional": é a
+atribuição da perda de ortogonalidade à **decomposição de domínio**, e não à
+discretização. O sinal é consistentemente negativo nos três modos, o que descarta
+ruído numérico.
+
+### 6.3 Vereditos
+
+| # | Hipótese | Veredito | Evidência |
+|---|---|---|---|
+| **H1** | O defeito é da escala $H$, não da escala $h$ | **✓ confirmada** | taxa vs $h$ = **0.0077** (platô), taxa vs $H$ = **1.993** |
+| **H2** | A identidade volume ↔ esqueleto vale no discreto | **✓ confirmada** | resíduo cai $O(h^{0.96})$: `3.73e-01` → `9.83e-02` |
+| **H3** | Enriquecer a interface reduz o defeito | **✓ confirmada** | fator **234×** do grau 1 ao 3 |
+| **H4** | O $\alpha$ ótimo difere do de `err_u` | ver §3.3 (E12c) | $\alpha$ atua só sobre a parcela irrotacional |
+
+#### H1 — o defeito não vê $h$
+
+$N_{dom}=3$ fixo, `nloc` $\in \{8,16,24,32\}$:
+
+| Modo | taxa de `ortho_cos` vs $h$ | `ortho_cos` no $h$ mais fino |
+|---|---|---|
+| `gradient` | **0.0077** | 1.988e-02 |
+| `mixed` | 0.0156 | 4.831e-03 |
+
+Refinar $h$ em 4× muda o defeito em **1%**. Ele é rigorosamente insensível a $h$.
+Sob refino de $H$, por contraste, cai a $O(H^{1.993})$. O defeito é da escala $H$,
+como `sec:erro-decomposicao` prevê — e a hipótese era falseável: se ele caísse com
+$h$, o erro seria de discretização e o capítulo estaria errado.
+
+#### H2 — as duas leituras concordam
+
+$N_{dom}=3$, modo `mixed`:
+
+| `nloc` | volume | esqueleto | resíduo relativo |
+|---|---|---|---|
+| 8 | −2.216676e-03 | −1.389837e-03 | 3.73e-01 |
+| 16 | −2.183904e-03 | −1.759823e-03 | 1.94e-01 |
+| 24 | −2.172949e-03 | −1.889063e-03 | 1.31e-01 |
+| 32 | −2.168622e-03 | −1.955411e-03 | 9.83e-02 |
+
+O resíduo cai por fator 3.79 sob refino 4×, isto é $O(h^{0.96})$: a identidade
+vale no limite. Com `nloc` fixo e $N_{dom}$ crescendo ele fica parado em ~0.21 —
+é governado por $h$, não por $H$.
+
+**Isso valida a ancoragem da constante *a posteriori*.** O potencial do downscaler
+é pinado por patch; a constante de cada subdomínio é ancorada na média de
+`projector.last_pT`, que é pós- versus pré-regularização e portanto difere por
+mais que uma constante. Se esse fosse um erro estrutural, o resíduo não iria a
+zero. Vai. A leitura pelo volume, que não depende de ancoragem nenhuma, é o
+árbitro — e foi por isso que ela foi implementada primeiro e de forma
+independente.
+
+**Caveat.** A identidade fecha onde o defeito é real (`gradient` 0.196, `mixed`
+0.229) e **falha no modo `solenoidal`** (1.87). Ali $\tilde{\bm v}\approx\bm 0$ e
+`ortho_abs` vale `−3.2e−08`, nível de ruído: o resíduo relativo entre duas
+quantidades desprezíveis não tem significado. O modo de referência para H2 é
+`gradient`.
+
+#### H3 — o enriquecimento ataca o defeito
+
+$N_{dom}=3$, `nloc=16`, $\alpha=1$, `ortho_cos`:
+
+| Grau | 1 | 2 | 3 | Fator |
+|---|---|---|---|---|
+| `gradient` | 1.995e-02 | 1.540e-03 | 8.528e-05 | **234×** |
+| `mixed` | 4.864e-03 | 2.129e-05 | 1.138e-07 | 42752× |
+
+Coerente com a teoria: espaço de interface mais rico → pressão mais contínua
+através de $\Gamma$ → salto menor → defeito menor. O fator muito maior no modo
+`mixed` sugere cancelamento parcial de sinal entre as contribuições; não se
+extrai conclusão disso aqui.
+
+### 6.4 A limitação declarada
+
+**O contraste com e sem regularização não foi medido.**
+
+`sec:erro-decomposicao` afirma que a regularização recupera a divergência nula e
+**não** recupera a ortogonalidade. Este estudo mede apenas o lado "com
+regularização": confirma que o defeito existe, que vem do esqueleto e que
+sobrevive à regularização. Não mede o arranjo sem regularização, e portanto **não
+verifica a metade da afirmação que diz que a divergência seria violada sem ela**.
+
+A razão da exclusão é metodológica, não de esforço: construir o campo não
+regularizado na malha MAC exigiria reconstruir `projector.last_uT` — BDM₁ em
+triângulos — nas faces MAC, e o erro dessa interpolação entraria no próprio
+instrumento de medida. Fica como trabalho seguinte.
+
+**Sem este parágrafo, uma leitura futura suporia que a afirmação foi verificada
+inteira. Não foi.**
+
+### 6.5 O que o instrumento habilita
+
+Por ser auto-contido (§6.1), o defeito de ortogonalidade se aplica a arranjos
+**sem solução manufaturada** — a cavidade de Ghia, o obstáculo em canal, e em
+particular a decomposição adaptativa por *quadtree*, cujo capítulo de resultados
+ainda não tem instrumento de verificação próprio. Uma decomposição adaptativa tem
+mais esqueleto que a uniforme, e a previsão natural é que o defeito cresça com a
+área de $\Gamma$. Fora do escopo deste estudo, que segue o caminho do Olshanskii,
+de disparo único.
+
+### 6.6 Comandos
+
+| Exp | Objetivo | Comando | Tempo |
+|---|---|---|---|
+| **E13** | Defeito e identidade (unitário) | `python -m pytest tests/test_ortho_defect.py -v` | ~10 s |
+| **H1** | Saturação em $h$ | `mpiexec -n 4 python tests/test_convergence_subspace.py --nlocs 8,16,24,32 --Ndom 3 --modes gradient,mixed` | ~12 s |
+| **H3** | Graus de interface | `mpiexec -n 4 python tests/test_convergence_subspace.py --degrees 1,2,3 --Ndom 3 --nloc 16 --modes gradient,mixed` | ~9 s |
+
+**Saídas:** `e13_saturacao.json`, `e13_graus.json` no mesmo diretório.
+
+**Nota de implementação.** O potencial local sai por
+`MACDownscaler.keep_potential` / `.last_potential`, um atributo *opt-in*, e não
+como terceiro valor de retorno de `solve_patch` — cuja assinatura o plano de
+migração RTCF/*quadtree* já altera em outro worktree. Com o default `False`, o
+caminho quente (von Kármán, cavidade) não paga nem cópia nem comunicação. A
+equivalência entre execução sequencial e `mpiexec -n 4` foi verificada em 12
+dígitos significativos.

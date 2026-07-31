@@ -83,7 +83,9 @@ def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
     malha fina (FineProjector) para err_vs_fine, que aquela função não
     calcula; delegar custaria a coluna ou um segundo solve fino.
     """
-    from mprm.benchmarks.hh import hh_build_w_mode, _l2_mac
+    from mprm.benchmarks.hh import (hh_build_w_mode, _l2_mac,
+                                    hh_ortho_defect, hh_assemble_psi,
+                                    hh_ortho_skeleton)
     from mprm.projector import MPrMProjector
     from mprm.downscaler import MACDownscaler
     from mprm.flow import mprm_projection_step, FineProjector
@@ -106,11 +108,20 @@ def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
                      executor_kind="sequential")
     projector = MPrMProjector(cfg, dt, comm=comm)
     downscaler = MACDownscaler(cfg, dt)
+    downscaler.keep_potential = True       # lado do esqueleto (eq:ErroOrtog.)
     uh1, uh2 = mprm_projection_step(w1, w2, projector, downscaler)
     wall = time.perf_counter() - t0
 
     err_abs = _l2_mac(uh1 - u1, uh2 - u2, h)
     wnorm = _l2_mac(w1, w2, h)
+
+    # eq:ErroOrtogonalidade pelas duas leituras. Ao contrário de err_* e de
+    # leak_ratio, não depende de solução exata: é inconsistência interna.
+    ortho_abs, ortho_cos = hh_ortho_defect(uh1, uh2, w1 - uh1, w2 - uh2, h)
+    psi = hh_assemble_psi(downscaler, projector, Ndom, nloc)
+    ortho_skel = hh_ortho_skeleton(uh1, uh2, psi, Ndom, nloc, h, dt)
+    _scale = max(abs(ortho_abs), abs(ortho_skel))
+    ortho_rel = None if _scale == 0.0 else abs(ortho_abs - ortho_skel) / _scale
 
     case = {
         "Ndom": Ndom, "H": float(H), "h": float(h), "N": N,
@@ -123,6 +134,13 @@ def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
         # métrica comparável entre os três modos, porque no modo gradient
         # o denominador de err_vs_exact não existe
         "leak_ratio": None if wnorm == 0.0 else err_abs / wnorm,
+        # defeito de ortogonalidade: |cos| porque o ajuste log-log de
+        # _fit_rate precisa de valores positivos, e o sinal é registrado
+        # em ortho_abs/ortho_skel
+        "ortho_abs": ortho_abs,
+        "ortho_cos": None if ortho_cos is None else abs(ortho_cos),
+        "ortho_skel": ortho_skel,
+        "ortho_identity_rel": ortho_rel,
         "divmax": float(np.abs(mac_divergence(uh1, uh2, h, h)).max()),
         "defect": float(downscaler.last_defect),
         "wall_s": wall,
@@ -256,6 +274,9 @@ def convergence_curve_hh(comm, Ndoms: list[int], nloc: int,
         results["rate_leak"] = _fit_rate(results["cases"], "H",
                                          "leak_ratio",
                                          verbose and comm.rank == 0)
+        results["rate_ortho"] = _fit_rate(results["cases"], "H",
+                                          "ortho_cos",
+                                          verbose and comm.rank == 0)
         if include_raw_mrcm:
             raw_cases = [c for c in results["cases"]
                         if c.get("err_raw_mrcm") is not None]
@@ -315,6 +336,9 @@ def convergence_curve_H(comm, Ndoms: list[int], h_fine_target: float,
         results["rate_leak"] = _fit_rate(results["cases"], "H",
                                          "leak_ratio",
                                          verbose and comm.rank == 0)
+        results["rate_ortho"] = _fit_rate(results["cases"], "H",
+                                          "ortho_cos",
+                                          verbose and comm.rank == 0)
 
     return results
 
@@ -362,6 +386,9 @@ def convergence_curve_h(comm, Ndom: int, nlocs: list[int],
         results["rate_leak"] = _fit_rate(results["cases"], "h",
                                          "leak_ratio",
                                          verbose and comm.rank == 0)
+        results["rate_ortho"] = _fit_rate(results["cases"], "h",
+                                          "ortho_cos",
+                                          verbose and comm.rank == 0)
 
     return results
 
