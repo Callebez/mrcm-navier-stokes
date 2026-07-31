@@ -399,45 +399,52 @@ extrai conclusão disso aqui.
 a redução é **geométrica no grau** — cada grau a mais divide o defeito por um
 fator aproximadamente constante (≈15× no modo `gradient`).
 
-### 6.3.1 Réplica da Fig. 6 de Lages, e duas discordâncias
+### 6.3.1 Réplica da Fig. 6 de Lages — onde ela já estava
 
-A Fig. 6 do artigo de Camila Lages (*The multiscale projection method for the
-solution of incompressible Navier–Stokes equations*, §3.1) varre $\alpha$ para
-$k=1,\dots,4$ em malha $90^2$ com $3\times3$ subdomínios, medindo o erro **contra
-a discretização não-decomposta** (`err_vs_fine`). O texto faz quatro afirmações
-verificáveis. Reproduzindo o arranjo exato:
+**Este confronto não é novo.** `docs/05-estudo-alpha.md` §"Estudo 1" já replica
+a Fig. 6 de Camila Lages (*The multiscale projection method for the solution of
+incompressible Navier–Stokes equations*, §3.1) no arranjo do artigo — malha
+$90^2$, $3\times3$ subdomínios, $k=1..4$, $\alpha\in[10^{-4},10^4]$ — com a
+tabela completa dos 36 casos, e já chega às mesmas duas refutações:
 
-| Afirmação do artigo | Veredito | Evidência medida |
-|---|---|---|
-| "solution improves when interface spaces are enriched" | **✓** | $k{=}1{\to}4$: `1.69e-1` → `3.44e-5` (fator 4900) |
-| "a minimum error can occur for some choice of $\alpha$ around unity" | **✓** | argmin $=0.1$ para todo $k$, em todas as métricas de erro |
-| "Errors are better for **large** values of $\alpha$" | **✗ para $k\ge3$** | $k{=}3$: **14×** pior em $\alpha{=}10^4$; $k{=}4$: **153×** pior |
-| "$(P_{H,4},U_{H,4})$ … $\alpha$ will have **less** impact" | **✗ invertido** | $k{=}4$ varia **197×**; $k{=}1$ varia **1.9×** (ver §6.3.2 — o 569× de `err_vs_fine` está inflado) |
+| Afirmação do artigo | Veredito (docs/05) |
+|---|---|
+| "solution improves when interface spaces are enriched" | ✅ |
+| "a minimum error can occur for some $\alpha$ around unity" | ✅ mínimo em $\alpha=0{,}1$ para todo $k$ |
+| "Errors are better for **large** values of $\alpha$" | ❌ o limite MHM degrada |
+| "$(P_4,U_4)$ menos sensível a $\alpha$" | ❌ é a **mais** sensível |
 
-As duas primeiras se confirmam sem ressalva. As duas últimas não: a recomendação
-de priorizar $\alpha$ grande vale para $k=1,2$ e **se inverte** para $k\ge3$, e a
-curva $k=4$ é a **mais** sensível a $\alpha$, não a menos.
+Aquele documento também explica o desacordo, atribuindo-o ao limite MHM e a duas
+diferenças de arranjo com o artigo: o potencial $\cos(\pi x)\cos(\pi y)$ com
+$\nabla\tilde p\cdot\bhat n=0$ (contra o $p$ de Olshanskii, de fluxo de
+contorno não nulo) e a discretização BDM₁–DG₀ em triângulos (contra FV/RT₀).
+**Consulte-o para o experimento; esta seção registra apenas o que o defeito de
+ortogonalidade acrescenta a ele.**
 
-**O defeito de ortogonalidade dá o mecanismo.** Medido por `ortho_cos`, o mínimo
-está em $\alpha=1$ **exatamente** para $k\ge2$ — "around unity", como o artigo
-diz —, enquanto o erro de velocidade é minimizado em $\alpha=0.1$:
+**O que é novo aqui.** Medido por `ortho_cos`, o mínimo está em $\alpha=1$
+**exatamente** para $k\ge2$, enquanto o erro de velocidade é minimizado em
+$\alpha=0{,}1$:
 
 | $k$ | argmin via `err_vs_fine` | argmin via `ortho_cos` |
 |---|---|---|
-| 1 | 0.1 | 0.1 |
-| 2 | 0.1 | **1** |
-| 3 | 0.1 | **1** |
-| 4 | 0.1 | **1** |
+| 1 | 0,1 | 0,1 |
+| 2 | 0,1 | **1** |
+| 3 | 0,1 | **1** |
+| 4 | 0,1 | **1** |
 
 São **ótimos diferentes**: $\alpha=1$ minimiza a *perda de ortogonalidade*,
-$\alpha=0.1$ minimiza o *erro de velocidade*. O $\alpha=1$ recomendado pelo
-capítulo do MRCM é, portanto, ótimo para a propriedade que a decomposição
-quebra — não para a acurácia da velocidade.
+$\alpha=0{,}1$ minimiza o *erro de velocidade*. O $\alpha=1$ recomendado pelo
+capítulo do MRCM é ótimo para a propriedade que a decomposição quebra — não para
+a acurácia da velocidade. Nesse sentido a intuição do artigo sobre "around
+unity" está certa: é o ótimo da métrica que ele não mediu.
 
 **Isto refina H4.** A hipótese ("o $\alpha$ que minimiza `ortho_cos` difere do
 que minimiza o erro") foi dada como refutada em §3.3, medida em $k=1$. Ela é
-**falsa em $k=1$ e verdadeira em $k\ge2$**: o desacoplamento entre os dois ótimos
-aparece só quando a interface é enriquecida.
+**falsa em $k=1$ e verdadeira em $k\ge2$**: o desacoplamento entre os dois
+ótimos só aparece com a interface enriquecida.
+
+E o §6.3.2 encontrou um erro em `docs/05` que afeta o número dele: o piso da
+referência fina invalida três dos nove pontos de $k=4$.
 
 **Figura:** `results_alpha/alpha_hh_fig6.png`, dois painéis — o deslocamento das
 estrelas (mínimos) entre eles *é* o achado. As quatro afirmações do artigo estão

@@ -33,8 +33,25 @@ o que o artigo define (projeções de espaços polinomiais completos).
 Configuração do artigo: malha fina 90×90, decomposição 3×3 (30×30
 células/subdomínio), espaços simétricos (P_{H,k}, U_{H,k}), k = 1..4.
 Referência: **solução não decomposta** (projeção MAC fina sobre o mesmo w,
-como na Fig. 6); o erro da referência fina vs o u analítico é 9,3e-5 —
-duas ordens abaixo dos erros multiescala, então as duas métricas coincidem.
+como na Fig. 6); o erro da referência fina vs o u analítico é 9,3e-5.
+
+> **Correção (2026-07-31).** A frase original seguia com "duas ordens abaixo
+> dos erros multiescala, então as duas métricas coincidem". Isso vale para
+> k = 1, 2, 3 e **é falso para k = 4**: ali os erros vão de 3,4e-5 a 1,4e-4, e
+> **três dos nove pontos (α = 1e-2, 1e-1, 1e0) caem ABAIXO do piso de 9,3e-5**.
+> Nessa faixa `err_vs_fine` mede a diferença entre dois erros, que cancela
+> parcialmente e cava um mínimo artificialmente fundo.
+>
+> Consequência para a última linha da tabela de confronto abaixo: o **570×**
+> de (P₄,U₄) é inflado. Medido contra o campo analítico, que não tem piso, o
+> spread é **197×** — a refutação sobrevive (k=1 varia 1,9×, logo k=4 continua
+> ~100× mais sensível), mas o número honesto é 197×.
+>
+> A precisão da referência fina é de máquina no sentido algébrico:
+> `FineProjector` usa `scipy.sparse.linalg.splu` (LU esparsa **direta**, sem
+> tolerância), com resíduo ‖Ax−b‖/‖b‖ = 4,9e-13. O limitante é a
+> discretização, não a álgebra. Ver `docs/14-decomposicao-por-subespaco.md`
+> §6.3.2.
 
 ### Erro relativo ‖u_h − u_fino‖/‖u_fino‖
 
@@ -60,7 +77,7 @@ duas ordens abaixo dos erros multiescala, então as duas métricas coincidem.
 | Variação suave do erro com α, de ~1e-2 a ~1 | ✅ Curvas suaves; faixa 3,4e-5–3,2e-1 (níveis menores porque nosso w é mais regular) |
 | "Um mínimo pode ocorrer para α próximo da unidade" | ✅ Mínimo interior em **α = 0,1** para TODOS os k (1,3–2,3× melhor que α=1) |
 | "Erros melhores para α grandes" | ❌ Aqui o limite MHM **degrada**: para k ≥ 2 as curvas convergem para ~2e-2 em α = 1e4 |
-| "(P₄,U₄) menos sensível a α" | ❌ É a curva MAIS sensível: 3,4e-5 (α=0,1) → 2,0e-2 (α=1e4), 570× |
+| "(P₄,U₄) menos sensível a α" | ❌ É a curva MAIS sensível: **197×** medido contra o campo analítico (o 570× via `err_vs_fine` é inflado pelo piso — ver a correção acima) |
 | Estabilidade/conservação independem de α | ✅ div ~2e-10 e defeito ~1e-10 em toda a varredura (Eq. 38) |
 
 **Leitura do desacordo em α grande:** no limite MHM (β→∞) o termo de Robin
