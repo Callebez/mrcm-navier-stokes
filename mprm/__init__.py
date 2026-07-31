@@ -46,6 +46,7 @@ from mprm.forces import (
 # ── Flow (time loops) ─────────────────────────────────────────────────────
 from mprm.flow import (
     mprm_projection_step,
+    FineProjector,
     run_flow,
     run_cavity,
     run_von_karman,
