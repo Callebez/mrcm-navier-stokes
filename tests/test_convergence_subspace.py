@@ -33,7 +33,8 @@ import numpy as np
 
 from common import (get_comm, apply_plot_style, banner, save_json,
                     INK, COLORS, DEFAULT_OUTDIR)
-from params import CommonParams, parse_args, parse_int_list
+from params import (CommonParams, parse_args, parse_int_list,
+                    parse_float_list)
 from mprm.benchmarks.convergence import convergence_curve_hh
 
 OUTDIR = os.path.join(DEFAULT_OUTDIR, "convergence_olshanskii")
@@ -99,6 +100,110 @@ def run_subspace_study(comm, modes, Ndoms, nloc, degreeU, degreeP, alpha,
     }
 
 
+def run_alpha_study(comm, modes, alphas, Ndom, nloc, degreeU, degreeP,
+                    verbose=True) -> dict:
+    """Varredura de α por subespaço, com malha e graus fixos.
+
+    A pergunta: o parâmetro de Robin controla o balanço entre continuidade
+    de pressão (α→0) e de fluxo (α→∞) — precisamente as duas grandezas cujo
+    salto aparece no resíduo de ortogonalidade. A previsão a testar é que o
+    α que minimiza o vazamento no modo `gradient` NÃO precisa coincidir com
+    o que o minimiza no modo `solenoidal`, porque cada modo penaliza um dos
+    dois saltos.
+    """
+    curves = {}
+    for mode in modes:
+        if verbose and comm.rank == 0:
+            banner(f"varredura de alpha — modo {mode}", comm)
+        cases = []
+        for alpha in alphas:
+            r = convergence_curve_hh(comm, [Ndom], nloc, degreeU, degreeP,
+                                     alpha, mode=mode, verbose=False)
+            case = dict(r["cases"][0])
+            case["alpha"] = float(alpha)
+            cases.append(case)
+            if verbose and comm.rank == 0:
+                print(f"  α={alpha:<9g} leak={case['leak_ratio']:.4e}  "
+                      f"err_exato={_fmt_opt(case['err_vs_exact'])}  "
+                      f"div={case['divmax']:.1e}", flush=True)
+        curves[mode] = {"cases": cases}
+
+    return {
+        "hypothesis": {
+            "E12c": "o alpha que minimiza o vazamento no modo gradient não "
+                    "coincide com o que o minimiza no modo solenoidal, "
+                    "porque cada modo penaliza um dos dois saltos",
+        },
+        "criterion": {
+            "E12c": "argmin_alpha leak_ratio(gradient) != "
+                    "argmin_alpha leak_ratio(solenoidal)",
+        },
+        "verdict": _verdict_alpha(curves),
+        "caveats": [
+            "alpha=1 é a escolha do capítulo do MRCM, herdada de estudos em "
+            "meios HETEROGÊNEOS; a etapa de projeção é homogênea e não herda "
+            "essa justificativa automaticamente",
+            "a varredura é de alpha, não de amplitude: o pipeline é linear em "
+            "w, logo varrer m_pr seria vazio por construção",
+        ],
+        "git_commit": _git_commit(),
+        "params": {"modes": list(modes), "alphas": [float(a) for a in alphas],
+                   "Ndom": Ndom, "nloc": nloc,
+                   "degreeU": degreeU, "degreeP": degreeP},
+        "curves": curves,
+    }
+
+
+def _fmt_opt(x, spec=".4e") -> str:
+    return "None      " if x is None else format(x, spec)
+
+
+def _argmin_alpha(cases, key):
+    """α do menor |key|, ignorando casos em que a métrica não existe."""
+    valid = [c for c in cases if c.get(key) is not None]
+    if not valid:
+        return None
+    return min(valid, key=lambda c: abs(c[key]))["alpha"]
+
+
+def _verdict_alpha(curves) -> dict:
+    """Decide E12c registrando também a SENSIBILIDADE a α.
+
+    O argmin sozinho engana: se a curva de um modo for plana, seu mínimo é
+    ruído e "os ótimos divergem" não significa nada. `spread` = (máx−mín)/mín
+    diz se o mínimo é real. Um modo só conta como sensível a α se variar
+    mais de 5% ao longo da varredura.
+    """
+    mins, spreads = {}, {}
+    for m, c in curves.items():
+        vals = [k["leak_ratio"] for k in c["cases"]
+                if k.get("leak_ratio") is not None]
+        mins[m] = _argmin_alpha(c["cases"], "leak_ratio")
+        spreads[m] = ((max(vals) - min(vals)) / min(vals)) if vals else None
+
+    sensiveis = [m for m, s in spreads.items() if s is not None and s > 0.05]
+    divergem = ("gradient" in mins and "solenoidal" in mins
+                and mins["gradient"] != mins["solenoidal"])
+    # `mixed` NÃO conta como testemunha independente: E12b estabelece que ele
+    # reproduz `gradient`, e contá-lo seria dupla contagem da mesma medição.
+    # Os dois subespaços independentes são gradient e solenoidal.
+    ambos_sensiveis = all(
+        (spreads.get(m) or 0.0) > 0.05 for m in ("gradient", "solenoidal")
+        if m in spreads)
+    return {
+        "E12c": {
+            "alpha_otimo_por_modo": mins,
+            "spread_relativo_por_modo": spreads,
+            "modos_sensiveis_a_alpha": sensiveis,
+            "argmins_divergem": divergem,
+            # só é achado se os argmins divergirem E os DOIS subespaços
+            # independentes forem sensíveis a α; se um for plano, seu
+            # mínimo é ruído e a divergência não significa nada
+            "confirmada": bool(divergem and ambos_sensiveis),
+        }
+    }
+
+
 def _verdict(curves) -> dict:
     """Decide E12a e E12b a partir das curvas medidas."""
     out = {}
@@ -144,6 +249,27 @@ def test_default_mixed_preserva_o_comportamento_anterior():
     for ca, cb in zip(a["cases"], b["cases"]):
         assert ca["err_vs_exact"] == cb["err_vs_exact"]
         assert ca["err_vs_fine"] == cb["err_vs_fine"]
+
+
+def test_curva_plana_nao_vira_veredito():
+    """Um argmin sobre curva plana é ruído, e não pode confirmar E12c.
+
+    `mixed` reproduz `gradient` (E12b), logo não é testemunha independente:
+    contá-lo levaria a confirmar E12c com uma única medição real.
+    """
+    # plana, com mínimo em α=1 — como o modo solenoidal medido, cujo
+    # spread real é 0.28% ao longo de seis décadas de α
+    plana = [{"alpha": a, "leak_ratio": r}
+             for a, r in [(0.1, 1.0003e-4), (1.0, 1.0000e-4),
+                          (10.0, 1.0002e-4)]]
+    fundo = [{"alpha": a, "leak_ratio": r}
+             for a, r in [(0.1, 9.3e-3), (1.0, 1.1e-2), (10.0, 1.3e-2)]]
+    v = _verdict_alpha({"gradient": {"cases": fundo},
+                        "solenoidal": {"cases": plana},
+                        "mixed": {"cases": fundo}})["E12c"]
+    assert v["argmins_divergem"] is True
+    assert v["confirmada"] is False, "curva plana não sustenta o veredito"
+    assert v["spread_relativo_por_modo"]["solenoidal"] < 0.05
 
 
 def test_erro_do_misto_e_o_erro_do_gradiente():
@@ -195,6 +321,36 @@ def plot_results(results, outdir):
     return path
 
 
+def plot_alpha(results, outdir):
+    plt = apply_plot_style()
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+
+    for mode, curve in results["curves"].items():
+        cases = sorted(curve["cases"], key=lambda c: c["alpha"])
+        al = np.array([c["alpha"] for c in cases])
+        leak = np.array([c["leak_ratio"] for c in cases])
+        style, color = MODE_STYLE.get(mode, ("o-", INK))
+        ax.loglog(al, leak, style, color=color, markersize=7,
+                  linewidth=2, label=mode)
+        i = int(np.argmin(leak))
+        ax.plot(al[i], leak[i], "*", color=color, markersize=16,
+                markeredgecolor=INK, markeredgewidth=0.6)
+
+    ax.set_xlabel(r"$\alpha$ (parâmetro de Robin, $\beta = \alpha H/K$)")
+    ax.set_ylabel(r"leak_ratio $= \|u_h - u_{ex}\|_2 / \|w\|_2$")
+    ax.set_title(r"E12c — $\alpha$ ótimo por subespaço (★ = mínimo)")
+    ax.legend(frameon=False, fontsize=9)
+    ax.grid(True, which="both", alpha=0.25)
+    fig.tight_layout()
+
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "e12_subspace_alpha.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ✓ Figura: {path}")
+    return path
+
+
 def main(argv=None):
     defaults = CommonParams(nloc=16, degreeU=1, degreeP=1, alpha=1.0)
     args = parse_args(
@@ -205,29 +361,41 @@ def main(argv=None):
                            help="lista de Ndom (nloc fixo)"),
             p.add_argument("--modes", default=DEFAULT_MODES,
                            help="subespaços da entrada, separados por vírgula"),
+            p.add_argument("--alphas", default=None,
+                           help="se dado, varre alpha em vez de Ndom "
+                                "(malha e graus fixos)"),
         ),
         argv=argv,
     )
 
     if args.quick:
         Ndoms, modes, nloc = [2, 3], ["gradient", "solenoidal", "mixed"], 8
+        alphas = parse_float_list(args.alphas) if args.alphas else None
     else:
         Ndoms = parse_int_list(args.Ndoms)
         modes = [m.strip() for m in args.modes.split(",") if m.strip()]
         nloc = args.nloc
+        alphas = parse_float_list(args.alphas) if args.alphas else None
 
     comm = get_comm()
     t0 = time.perf_counter()
-    results = run_subspace_study(comm, modes, Ndoms, nloc,
-                                 args.degreeU, args.degreeP, args.alpha,
-                                 verbose=args.verbose)
+    if alphas:
+        results = run_alpha_study(comm, modes, alphas, args.Ndom, nloc,
+                                  args.degreeU, args.degreeP,
+                                  verbose=args.verbose)
+        stem, plotter = "e12_subspace_alpha", plot_alpha
+    else:
+        results = run_subspace_study(comm, modes, Ndoms, nloc,
+                                     args.degreeU, args.degreeP, args.alpha,
+                                     verbose=args.verbose)
+        stem, plotter = "e12_subspace", plot_results
     elapsed = time.perf_counter() - t0
 
     if comm.rank == 0:
         os.makedirs(OUTDIR, exist_ok=True)
-        save_json(results, OUTDIR, "e12_subspace.json", comm)
+        save_json(results, OUTDIR, f"{stem}.json", comm)
         try:
-            plot_results(results, OUTDIR)
+            plotter(results, OUTDIR)
         except Exception as e:
             print(f"  ⚠ Plot failed: {e}")
 
