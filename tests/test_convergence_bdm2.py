@@ -31,7 +31,9 @@ def rel_err(a1, a2, b1, b2):
     d = np.sqrt(np.sum(b1**2) + np.sum(b2**2))
     return float(n / d) if d > 0 else 0.0
 
-def save_json(data, name):
+def save_json(data, name, comm=None):
+    if comm is not None and comm.rank != 0:
+        return
     os.makedirs(OUTDIR, exist_ok=True)
     path = os.path.join(OUTDIR, name)
     with open(path, 'w') as f:
@@ -60,7 +62,7 @@ def run_E1(comm):
                                      alpha=a, basis_kind=BASIS_KIND,
                                      mixed_order=MIXED_ORDER, verbose=False)
         results["curves"].append({"alpha": a, **curve})
-    save_json(results, "e1_hh_alpha.json")
+    save_json(results, "e1_hh_alpha.json", comm)
     return results
 
 
@@ -81,7 +83,7 @@ def run_E2(comm):
                                          alpha=a, basis_kind=BASIS_KIND,
                                          mixed_order=MIXED_ORDER, verbose=False)
             results["curves"].append({"alpha": a, "k": k, **curve})
-    save_json(results, "e2_hh_degrees_sym.json")
+    save_json(results, "e2_hh_degrees_sym.json", comm)
     return results
 
 
@@ -102,7 +104,7 @@ def run_E3(comm):
                                      alpha=1.0, basis_kind=BASIS_KIND,
                                      mixed_order=MIXED_ORDER, verbose=False)
         results["curves"].append({"degU": degU, "degP": degP, **curve})
-    save_json(results, "e3_hh_degrees_asym.json")
+    save_json(results, "e3_hh_degrees_asym.json", comm)
     return results
 
 
@@ -119,7 +121,7 @@ def run_E4(comm):
                                 basis_kind=BASIS_KIND, mixed_order=MIXED_ORDER,
                                 verbose=False)
     results = {"meta": {"experiment": "E4", "mixed_order": MIXED_ORDER}, **curve}
-    save_json(results, "e4_H_multiscale.json")
+    save_json(results, "e4_H_multiscale.json", comm)
     return results
 
 
@@ -136,7 +138,7 @@ def run_E5(comm):
                                 basis_kind=BASIS_KIND, mixed_order=MIXED_ORDER,
                                 verbose=False)
     results = {"meta": {"experiment": "E5", "mixed_order": MIXED_ORDER}, **curve}
-    save_json(results, "e5_h_saturation.json")
+    save_json(results, "e5_h_saturation.json", comm)
     return results
 
 
@@ -152,7 +154,7 @@ def run_E6(comm):
                                 basis_kind=BASIS_KIND, mode="mixed",
                                 mixed_order=MIXED_ORDER, verbose=False)
     results = {"meta": {"experiment": "E6", "mixed_order": MIXED_ORDER}, **curve}
-    save_json(results, "e6_p_degree.json")
+    save_json(results, "e6_p_degree.json", comm)
     return results
 
 
@@ -169,7 +171,7 @@ def run_E10(comm):
                                  include_raw_mrcm=True,
                                  mixed_order=MIXED_ORDER, verbose=False)
     results = {"meta": {"experiment": "E10", "mixed_order": MIXED_ORDER}, **curve}
-    save_json(results, "e10_downscaling_on_off.json")
+    save_json(results, "e10_downscaling_on_off.json", comm)
     return results
 
 
@@ -191,7 +193,7 @@ def run_E12(comm):
                                      mode=mode, mixed_order=MIXED_ORDER,
                                      verbose=False)
         results["curves"].append({"mode": mode, **curve})
-    save_json(results, "e12_subspace.json")
+    save_json(results, "e12_subspace.json", comm)
     return results
 
 
@@ -216,7 +218,7 @@ def run_E12c(comm):
                                         verbose=False)
             cur.append({"alpha": a, **case})
         results["curves"].append({"mode": mode, "cases": cur})
-    save_json(results, "e12_subspace_alpha.json")
+    save_json(results, "e12_subspace_alpha.json", comm)
     return results
 
 
@@ -237,7 +239,7 @@ def run_E12d(comm):
                                          basis_kind=BASIS_KIND, mode=mode,
                                          mixed_order=MIXED_ORDER, verbose=False)
             results["curves"].append({"Hh_ratio": hh_ratio, "mode": mode, **curve})
-    save_json(results, "e12d_hh_ratio.json")
+    save_json(results, "e12d_hh_ratio.json", comm)
     return results
 
 
@@ -262,7 +264,7 @@ def run_E13_H1(comm):
                                         verbose=False)
             cur.append({"nloc": nloc, **case})
         results["curves"].append({"mode": mode, "cases": cur})
-    save_json(results, "e13_saturacao.json")
+    save_json(results, "e13_saturacao.json", comm)
     return results
 
 
@@ -287,7 +289,7 @@ def run_E13_H3(comm):
                                         verbose=False)
             cur.append({"degree": deg, **case})
         results["curves"].append({"mode": mode, "cases": cur})
-    save_json(results, "e13_graus.json")
+    save_json(results, "e13_graus.json", comm)
     return results
 
 
