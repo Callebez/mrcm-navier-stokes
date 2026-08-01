@@ -105,8 +105,8 @@ def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
                      degreeU=degreeU, degreeP=degreeP, alpha=float(alpha),
                      basis_kind=basis_kind,
                      mixed_family="BDM", mixed_order=mixed_order,
-                     local_solver_mode="iterative" if mixed_order >= 1 else "direct",
-                     executor_kind="sequential")
+                     local_solver_mode="direct",
+                     executor_kind="mpi" if mixed_order >= 1 else "sequential")
     projector = MPrMProjector(cfg, dt, comm=comm)
     downscaler = MACDownscaler(cfg, dt)
     downscaler.keep_potential = True       # lado do esqueleto (eq:ErroOrtog.)
@@ -408,6 +408,7 @@ def convergence_curve_p(comm, Ndom: int, nloc: int,
                         basis_kind: str = "legendre_P",
                         asymmetric_pairs: list[tuple[int, int]] | None = None,
                         mode: str = "mixed",
+                        mixed_order: int = 0,
                         verbose: bool = True) -> dict:
     """Modo p (grau): malha fixa, graus crescentes.
 

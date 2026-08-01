@@ -149,8 +149,8 @@ def run_E6(comm):
     banner("E6 — Modo p grau (BDM₂)", comm)
     ks = [1, 2, 3, 4]
     curve = convergence_curve_p(comm, Ndom=4, nloc=16, ks=ks, alpha=1.0,
-                                basis_kind=BASIS_KIND, mixed_order=MIXED_ORDER,
-                                verbose=False)
+                                basis_kind=BASIS_KIND, mode="mixed",
+                                mixed_order=MIXED_ORDER, verbose=False)
     results = {"meta": {"experiment": "E6", "mixed_order": MIXED_ORDER}, **curve}
     save_json(results, "e6_p_degree.json")
     return results
