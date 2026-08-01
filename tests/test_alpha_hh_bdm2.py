@@ -103,6 +103,7 @@ def _run_one_case(comm, w1, w2, uf1, uf2, u1, u2,
                      degreeU=k, degreeP=k, alpha=float(alpha),
                      basis_kind=basis_kind,
                      mixed_family="BDM", mixed_order=1,
+                     local_solver_mode="iterative",
                      executor_kind="mpi")
     from mprm.benchmarks.hh import (hh_ortho_defect, hh_assemble_psi,
                                     hh_ortho_skeleton, _l2_mac)
