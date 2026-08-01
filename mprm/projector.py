@@ -160,15 +160,16 @@ class MPrMProjector:
                 W, a_form, bcs,
                 use_iterative=(cfg.local_solver_mode == "iterative"), cfg=cfg)
 
-            # Fonte DG por subdomínio + mapa célula fina global -> dof DG.
-            f_i = Function(Q)
+            # Fonte DG₀ (1 valor por célula, independente do espaço Q) +
+            # mapa célula fina global -> dof DG₀.  A projeção de DG₀ contra
+            # q_test ∈ Q (qualquer ordem) é bem definida e exata.
+            f_i = Function(FunctionSpace(mesh, "DG", 0))
             self.src_fn[isub] = f_i
             _, q_test = TestFunctions(W)
             self.L_forms[isub] = -f_i * q_test * dx_m
             Xc = VectorFunctionSpace(mesh, "DG", 0)
             xc = Function(Xc).interpolate(SpatialCoordinate(mesh))
             xcd = xc.dat.data_ro
-            assert cfg.mixed_order == 0, "fonte por célula requer DG0"
             ic = np.floor(xcd[:, 0] / hx_f).astype(int)
             jc = np.floor(xcd[:, 1] / hy_f).astype(int)
             self.cell_map[isub] = (np.clip(ic, 0, cfg.Nglobx - 1),
