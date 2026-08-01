@@ -73,7 +73,7 @@ def _fit_rate(cases: list[dict], x_key: str, err_key: str,
 
 def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
                       basis_kind, dt, include_raw_mrcm=False,
-                      mode="mixed") -> dict:
+                      mode="mixed", mixed_order=0) -> dict:
     """Um nível Hh: monta offline, projeta, mede erro.
 
     `mode` seleciona o subespaço da entrada (ver hh_build_w_mode). O default
@@ -104,7 +104,7 @@ def _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP, alpha,
     cfg = MRCMConfig(Ndomx=Ndom, Ndomy=Ndom, nlocx=nloc, nlocy=nloc,
                      degreeU=degreeU, degreeP=degreeP, alpha=float(alpha),
                      basis_kind=basis_kind,
-                     mixed_family="BDM", mixed_order=0,
+                     mixed_family="BDM", mixed_order=mixed_order,
                      executor_kind="sequential")
     projector = MPrMProjector(cfg, dt, comm=comm)
     downscaler = MACDownscaler(cfg, dt)
@@ -233,6 +233,7 @@ def convergence_curve_hh(comm, Ndoms: list[int], nloc: int,
                          basis_kind: str = "legendre_P",
                          include_raw_mrcm: bool = False,
                          mode: str = "mixed",
+                         mixed_order: int = 0,
                          verbose: bool = True) -> dict:
     """Modo Hh: nloc fixo, Ndom varre → H e h proporcionais.
 
