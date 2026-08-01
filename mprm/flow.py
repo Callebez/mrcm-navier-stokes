@@ -182,11 +182,12 @@ def run_flow(problem, Ndomx, Ndomy, nloc, T, dt=None, method="mprm",
     nsteps = int(np.ceil(T / dt))
 
     if method == "mprm":
+        executor = "mpi" if (comm is not None and comm.size > 1) else "sequential"
         cfg = MRCMConfig(Ndomx=Ndomx, Ndomy=Ndomy, nlocx=nloc, nlocy=nloc,
                          degreeU=degreeU, degreeP=degreeP, alpha=alpha,
                          basis_kind=basis_kind, Lx=problem.Lx, Ly=problem.Ly,
                          mixed_family="BDM", mixed_order=0,
-                         executor_kind="sequential")
+                         executor_kind=executor)
         projector = MPrMProjector(cfg, dt, comm=comm,
                                   problem=problem, eps_solid=eps_solid)
         downscaler = MACDownscaler(cfg, dt)
