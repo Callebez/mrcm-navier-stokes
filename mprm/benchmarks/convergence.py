@@ -255,7 +255,7 @@ def convergence_curve_hh(comm, Ndoms: list[int], nloc: int,
     for Ndom in Ndoms:
         case = _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP,
                                  alpha, basis_kind, dt, include_raw_mrcm,
-                                 mode=mode)
+                                 mode=mode, mixed_order=mixed_order)
         results["cases"].append(case)
         if verbose and comm.rank == 0:
             extra = ""
@@ -298,6 +298,7 @@ def convergence_curve_H(comm, Ndoms: list[int], h_fine_target: float,
                         degreeU: int, degreeP: int, alpha: float,
                         basis_kind: str = "legendre_P",
                         mode: str = "mixed",
+                        mixed_order: int = 0,
                         verbose: bool = True) -> dict:
     """Modo H (multiescala): h ~ fixo, Ndom varia → H→0.
 
@@ -320,7 +321,8 @@ def convergence_curve_H(comm, Ndoms: list[int], h_fine_target: float,
     for Ndom in Ndoms:
         nloc = max(2, round(1.0 / (h_fine_target * Ndom)))
         case = _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP,
-                                 alpha, basis_kind, dt, mode=mode)
+                                 alpha, basis_kind, dt, mode=mode,
+                                 mixed_order=mixed_order)
         results["cases"].append(case)
         if verbose and comm.rank == 0:
             print(f"  Ndom={Ndom:3d}  nloc={nloc:4d}  H={case['H']:.4f}  "
@@ -371,7 +373,8 @@ def convergence_curve_h(comm, Ndom: int, nlocs: list[int],
 
     for nloc in nlocs:
         case = _run_one_hh_level(comm, Ndom, nloc, degreeU, degreeP,
-                                 alpha, basis_kind, dt, mode=mode)
+                                 alpha, basis_kind, dt, mode=mode,
+                                 mixed_order=mixed_order)
         results["cases"].append(case)
         if verbose and comm.rank == 0:
             print(f"  nloc={nloc:3d}  h={case['h']:.5f}  N={case['N']:4d}:  "
@@ -433,7 +436,8 @@ def convergence_curve_p(comm, Ndom: int, nloc: int,
 
     for degU, degP in pairs:
         case = _run_one_hh_level(comm, Ndom, nloc, degU, degP,
-                                 alpha, basis_kind, dt, mode=mode)
+                                 alpha, basis_kind, dt, mode=mode,
+                                 mixed_order=mixed_order)
         case["degreeU"] = degU
         case["degreeP"] = degP
         results["cases"].append(case)
