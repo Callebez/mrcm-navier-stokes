@@ -143,7 +143,8 @@ def plot_results(results: dict, outdir: str):
         k_cases = [c for c in cases if c["degreeU"] == k]
         if not k_cases: continue
         best = min(k_cases, key=lambda c: c["err_vs_fine"])
-        ax.plot(best["u_profile"], best["y_u"], "-", linewidth=2,
+        prof = best.get("profiles", best)
+        ax.plot(prof["u"], prof["y_u"], "-", linewidth=2,
                 color=COLORS.get(k, f"C{k}"),
                 label=f"MPrM k={k}, α={best['alpha']:.1e}")
         ax.plot(GHIA_U_100["u"], GHIA_U_100["y"], "ko", markersize=5,
@@ -162,7 +163,8 @@ def plot_results(results: dict, outdir: str):
         c = [c for c in cases if c["degreeU"] == k and abs(c["alpha"] - a) < 1e-9]
         if not c: continue
         c = c[0]
-        ax.plot(c["u_profile"], c["y_u"], "-", linewidth=1, alpha=0.7,
+        prof = c.get("profiles", c)
+        ax.plot(prof["u"], prof["y_u"], "-", linewidth=1, alpha=0.7,
                 label=f"α={a:.0e}")
     ax.plot(GHIA_U_100["u"], GHIA_U_100["y"], "ko", markersize=5, label="Ghia")
     ax.set_xlabel("u"); ax.set_ylabel("y")
