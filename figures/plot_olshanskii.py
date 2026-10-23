@@ -61,8 +61,7 @@ def main() -> int:
 
     plotting.curve_panel(
         ax, series, "$H$",
-        "erro relativo contra a solução fina sem decomposição")
-    fig.tight_layout()
+        plotting.err_label("u", "fina_sem_decomposicao"))
     plotting.save_figure(fig, "ns", "fig_ns-olshanskii")
     return 0
 

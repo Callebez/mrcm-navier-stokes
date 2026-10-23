@@ -1,0 +1,27 @@
+figura:  fig_ns-par-misto
+secao:   5.7.3
+estudo:  NavierStokes (bloco de projecao)
+fontes:
+  - results_alpha/alpha_hh.json
+  - results_alpha/alpha_hh_bdm2.json
+git_sha (figura, arvore que desenhou): 7fc28a0-dirty
+
+erro medido: fina_sem_decomposicao
+eixo x:  alpha (log)
+eixo y:  erro relativo contra a solucao fina sem decomposicao (log)
+paineis: (painel unico)
+
+campos consumidos:
+  - cases[].alpha
+  - cases[].err_vs_fine
+  - cases[].degree
+
+excluidos pelo crivo:
+  - wall_s e timings: custo nao e afirmacao de nenhuma destas tres figuras
+  - rss_peak_mb: memoria residente, usada para dimensionar a campanha
+  - n_iter do solver linear: diagnostico de implementacao, nao de metodo
+  - results_alpha/alpha_hh_rt0.json: o caminho de RT0 roda em quadrilateros enquanto os demais rodam em triangulacoes, de modo que par misto e forma de celula variam juntos; e os valores de alpha a partir de 1e2 sao falha da fatoracao local. A ressalva pertence ao texto, nao a figura
+  - as ordens 1 a 3 do BDM2: em regime moderado coincidem com as do BDM1 por construcao, e oito curvas sobrepostas escondem o argumento. Fica so a ordem mais alta, que e onde as duas se separam
+
+o que a legenda precisa dizer:
+  Cinco curvas: as quatro ordens do espaco de interface com BDM1 (solidas) e a ordem mais alta com BDM2 (tracejada, mesma cor). Em alpha moderado as duas coincidem; a separacao em alpha grande e o que a subida na hierarquia do par misto compra.

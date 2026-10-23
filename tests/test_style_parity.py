@@ -1,12 +1,33 @@
 """A copia do estilo e consistente. Dois repositorios, UMA dissertacao."""
 
+import os
 from pathlib import Path
+
+import pytest
 
 # Conhecido do spec: \the\textwidth = 455,0 pt = 6,2960 in
 FULL = 6.30
 HALF = 3.05
 
 REF_KEYS = {"analitica", "fina_sem_decomposicao", "monolitica_mais_fina"}
+
+COPIA = Path(__file__).resolve().parents[1] / "mprm" / "plotting.py"
+ORIGEM = Path(os.environ.get(
+    "MRCM_FIREDRAKE", Path.home() / "mrcm" / "mrcm-firedrake")
+) / "studies" / "_harness" / "plotting.py"
+
+
+def test_a_copia_do_estilo_e_byte_a_byte():
+    """O plano pede copia byte-identica; o teste anterior so conferia que os
+    NOMES da API existiam, de modo que uma mudanca de paleta ou de
+    `_ajustar_rotulos_log` num repositorio so passaria despercebida.
+
+    A unica diferenca legitima entre os dois repositorios e o destino das
+    figuras, e ela vive em `mprm/paths.py`, FORA do arquivo copiado."""
+    if not ORIGEM.exists():
+        pytest.skip(f"{ORIGEM} ausente (defina MRCM_FIREDRAKE)")
+    assert COPIA.read_bytes() == ORIGEM.read_bytes(), (
+        f"{COPIA} divergiu de {ORIGEM}; refaca a copia com `cp`")
 
 
 def test_a_copia_expoe_a_api_publica():

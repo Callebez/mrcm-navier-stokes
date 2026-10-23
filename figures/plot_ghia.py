@@ -42,7 +42,13 @@ def main() -> int:
     doc = json.loads(JSON.read_text())
     casos = sorted(doc["cases"], key=lambda c: c["Re"])
 
-    fig, axes = plotting.new_figure(2, len(casos), height_per_row=0.70)
+    # `height_per_row` é a altura de cada LINHA de painéis, EM POLEGADAS.
+    # `0.70` aqui foi lido como fração da largura e produziu uma figura de
+    # 1,4 in para seis painéis, que saíram sobrepostos e ilegíveis. Com três
+    # colunas em 6,30 in cada painel tem 2,1 in de largura, e 2,45 in de
+    # altura por linha lhe dá proporção próxima da quadrada, que é a certa
+    # para um perfil sobre a linha de centro de uma cavidade quadrada.
+    fig, axes = plotting.new_figure(2, len(casos), height_per_row=2.45)
 
     for col, caso in enumerate(casos):
         re = caso["Re"]
@@ -56,8 +62,11 @@ def main() -> int:
                 color=plotting.C["ref_fem"], ms=4, mfc="none",
                 label="Ghia et al. (1982)")
         ax.set_xlabel("$u$")
-        ax.set_ylabel("$y$")
-        ax.legend(loc="best", fontsize=7.0, title=f"$Re = {re}$")
+        # O número de Reynolds é CONFIGURAÇÃO: vai na figura como anotação, e
+        # não como título de legenda. Como título ele arrastava consigo uma
+        # caixa de legenda por painel, que cobria o próprio perfil.
+        ax.annotate(f"$Re = {re}$", xy=(0.5, 1.03), xycoords="axes fraction",
+                    ha="center", va="bottom", fontsize=9)
         ax.grid(True, alpha=0.25, linestyle=":")
         plotting.panel_tag(ax, "abc"[col])
 
@@ -69,11 +78,24 @@ def main() -> int:
         ax.plot(GHIA_V[re]["x"], GHIA_V[re]["v"], "o",
                 color=plotting.C["ref_fem"], ms=4, mfc="none")
         ax.set_xlabel("$x$")
-        ax.set_ylabel("$v$")
         ax.grid(True, alpha=0.25, linestyle=":")
         plotting.panel_tag(ax, "def"[col])
 
-    fig.tight_layout()
+    # Rótulo do eixo y só na coluna da esquerda: as três colunas partilham a
+    # grandeza, e repeti-lo três vezes rouba largura dos painéis.
+    axes[0][0].set_ylabel("$y$")
+    axes[1][0].set_ylabel("$v$")
+    for linha in axes:
+        for ax in linha[1:]:
+            ax.set_yticklabels([])
+    for linha in axes:
+        lo = min(a.get_ylim()[0] for a in linha)
+        hi = max(a.get_ylim()[1] for a in linha)
+        for ax in linha:
+            ax.set_ylim(lo, hi)
+
+    # Uma legenda para os seis painéis: as séries são as mesmas em todos.
+    plotting.shared_legend(fig, axes[0][0], ncol=2, fontsize=8.0)
     plotting.save_figure(fig, "ns", "fig_ns-ghia")
     return 0
 

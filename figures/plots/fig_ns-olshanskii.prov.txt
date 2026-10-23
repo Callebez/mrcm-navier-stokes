@@ -1,0 +1,25 @@
+figura:  fig_ns-olshanskii
+secao:   5.7.2
+estudo:  NavierStokes (bloco de projecao)
+fontes:
+  - results_alpha/convergence_olshanskii/e1_hh_alpha.json
+git_sha (figura, arvore que desenhou): 7fc28a0-dirty
+
+erro medido: fina_sem_decomposicao
+eixo x:  H (log)
+eixo y:  erro relativo contra a solucao fina sem decomposicao (log)
+paineis: (painel unico)
+
+campos consumidos:
+  - curves[].alpha
+  - curves[].cases[].H
+  - curves[].cases[].err_vs_fine
+
+excluidos pelo crivo:
+  - wall_s e timings: custo nao e afirmacao de nenhuma destas tres figuras
+  - rss_peak_mb: memoria residente, usada para dimensionar a campanha
+  - n_iter do solver linear: diagnostico de implementacao, nao de metodo
+  - err_vs_exact: a etapa de projecao e medida contra a solucao fina sem decomposicao, que e o que isola o acoplamento
+
+o que a legenda precisa dizer:
+  Convergencia da etapa de projecao sobre o campo analitico de Olshanskii2013, com dt = 1, de modo que a etapa eliptica fica independente do avanco temporal. A reta pontilhada e a referencia de segunda ordem. A curva de alpha = 0,01 NAO converge (taxa 0,64) e cai no H mais grosso: e ponto adverso e fica na figura.

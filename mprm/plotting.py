@@ -19,9 +19,7 @@ from pathlib import Path
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 
-import os
-_plots_dir = __import__('pathlib').Path(__file__).resolve().parents[1] / 'figures' / 'plots'
-os.makedirs(_plots_dir, exist_ok=True)
+from . import paths
 
 # ═══════════════════════════════════════════════════════════════════
 # Paleta (colorblind-safe, print-safe, ColorBrewer Set1 adaptada)
@@ -67,8 +65,18 @@ C = {
 
 # Rampa categórica de uso geral, para curvas indexadas por um parâmetro
 # (pares (ℓ_U, ℓ_P), contrastes, valores de α). Ordem estável.
-PALETTE = ["#2166ac", "#b2182b", "#4daf4a", "#ff7f00", "#984ea3",
-           "#a65628", "#377eb8", "#e41a1c", "#1d4e7f"]
+#
+# Base Okabe-Ito, desenhada para deficiência de visão cromática e validada
+# em impressão. A rampa ColorBrewer anterior não sustentava sete categorias:
+# `#2166ac` e `#377eb8` distavam ΔE = 12,9 em visão normal e ΔE = 2,9 sob
+# protanopia, e caíam lado a lado justamente nas figuras de sete pares de
+# graus de interface, onde as duas curvas colididas eram a pior e a melhor.
+# Esta rampa mantém ΔE ≥ 26 em visão normal e ΔE ≥ 19 sob deuteranopia e
+# protanopia até a nona cor (`studies/tests/test_plotting_style.py`).
+# Os dois azuis diferem em luminância (46 e 70), de modo que separam
+# também em escala de cinza.
+PALETTE = ["#0072B2", "#D55E00", "#009E73", "#E69F00", "#CC79A7",
+           "#8B4A0F", "#56B4E9", "#332288", "#3A3A3A"]
 
 # ═══════════════════════════════════════════════════════════════════
 # Cores por solução de referência
@@ -89,6 +97,48 @@ REF_LABEL = {
     "monolitica_mais_fina":
         "contra a solução monolítica em malha oito vezes mais fina",
 }
+
+# ═══════════════════════════════════════════════════════════════════
+# Rótulo do eixo de erro
+#
+# `REF_LABEL` nomeia a referência por extenso e serve à LEGENDA LaTeX e ao
+# arquivo de proveniência. No EIXO ele não cabe: "erro relativo $L^2$ de
+# pressão contra a solução monolítica em malha oito vezes mais fina" é mais
+# alto que os eixos e saía truncado no meio da palavra em oito das figuras.
+#
+# No eixo vai a notação matemática, que nomeia a solução de referência pelo
+# símbolo e ocupa um terço do espaço. Quem é cada símbolo:
+#
+#   p,  u          solução analítica do problema manufaturado
+#   p_h, u_h       elementos finitos mistos na malha fina, SEM decomposição
+#   p_{h/8}        monolítica no grid oito vezes mais fino que o dado
+#   p_H, u_H       solução multiescala — a que está sendo medida
+#
+# A legenda LaTeX continua declarando por extenso qual é a referência, que
+# é onde a regra do plano a exige.
+# ═══════════════════════════════════════════════════════════════════
+
+REF_SYMBOL = {
+    "analitica":             "{campo}",
+    "fina_sem_decomposicao": "{campo}_h",
+    "monolitica_mais_fina":  "{campo}_{{h/8}}",
+}
+
+
+def err_label(campo: str, reference: str) -> str:
+    """Rótulo curto do eixo de erro, em notação matemática.
+
+    ``campo`` é o símbolo da grandeza (``"p"``, ``"u"``); ``reference`` é
+    uma chave de ``REF``. Devolve, por exemplo, para
+    ``err_label("p", "monolitica_mais_fina")``::
+
+        $\\|p_H - p_{h/8}\\|_{L^2} / \\|p_{h/8}\\|_{L^2}$
+    """
+    if reference not in REF_SYMBOL:
+        raise KeyError(f"referência desconhecida: {reference!r}")
+    ref = REF_SYMBOL[reference].format(campo=campo)
+    return (rf"$\|{campo}_H - {ref}\|_{{L^2}}"
+            rf"\,/\,\|{ref}\|_{{L^2}}$")
 
 # \the\textwidth da classe USPSC = 455,0 pt = 6,2960 in.
 FIG_W = {"full": 6.30, "half": 3.05}
@@ -146,8 +196,14 @@ def apply_style() -> None:
 
         "figure.dpi": 150,
         "savefig.dpi": 300,
-        "savefig.bbox": "tight",
-        "savefig.pad_inches": 0.05,
+        # `bbox="tight"` RECORTA a página para a tinta desenhada e assim
+        # DESCARTA o figsize: as páginas saíam de 410 a 454 pt em vez de 455,
+        # e `\includegraphics[width=\textwidth]` reescalava cada figura por um
+        # fator diferente, fazendo o corpo de letra variar até 11% entre
+        # figuras vizinhas. A largura só é travada se a página for a figura.
+        # O ajuste do conteúdo passa a ser do layout restrito (`new_figure`).
+        "savefig.bbox": "standard",
+        "savefig.pad_inches": 0.0,
 
         "axes.grid": True,
         "grid.alpha": 0.25,
@@ -168,13 +224,32 @@ def new_figure(nrows: int = 1, ncols: int = 1, width: str = "full", **kwargs):
     ``width`` é ``"full"`` ou ``"half"``. Passar ``figsize`` explícito é erro:
     a largura não é negociável, porque as figuras precisam formar um conjunto
     quando postas lado a lado no documento.
+
+    ``height_per_row`` é a altura de CADA LINHA de painéis, **em polegadas**.
+    Por omissão vale ``0.74 * largura``, que é onde mora a armadilha: o valor
+    default é calculado a partir da largura e por isso PARECE uma fração dela.
+    Quem passou ``height_per_row=0.70`` supondo fração obteve 0,70 in por
+    linha e uma figura de 126 pt de altura com seis painéis sobrepostos. Daí
+    a validação abaixo: nenhuma linha de painéis útil mede menos de uma
+    polegada, de modo que um valor menor só pode ser fração passada por
+    engano.
+
+    O layout é restrito (`constrained`), e não `tight_layout`: o layout
+    restrito acomoda o conteúdo DENTRO do figsize dado, ao passo que
+    `bbox_inches="tight"` recortava a página e destruía a trava de largura.
+    Por isso `fig.tight_layout()` não deve ser chamado sobre estas figuras.
     """
     if "figsize" in kwargs:
         raise ValueError(
             "figsize explícito é proibido; use width='full' ou 'half'")
     w = FIG_W[width]
-    h = kwargs.pop("height_per_row", 0.74 * w) * nrows
-    return plt.subplots(nrows, ncols, figsize=(w, h), **kwargs)
+    hpr = kwargs.pop("height_per_row", 0.74 * w)
+    if hpr < 1.0:
+        raise ValueError(
+            f"height_per_row={hpr} é altura POR LINHA em polegadas, não "
+            f"fração da largura; use algo como {hpr * w:.2f}")
+    kwargs.setdefault("layout", "constrained")
+    return plt.subplots(nrows, ncols, figsize=(w, hpr * nrows), **kwargs)
 
 
 def stacked_panels(nrows: int = 2, height_ratios=None, **kwargs):
@@ -183,8 +258,8 @@ def stacked_panels(nrows: int = 2, height_ratios=None, **kwargs):
     defaults = dict(
         figsize=(FIG_W["full"], 2.55 * nrows),
         sharex=True,
-        gridspec_kw={"height_ratios": height_ratios or [1] * nrows,
-                     "hspace": 0.08},
+        layout="constrained",
+        gridspec_kw={"height_ratios": height_ratios or [1] * nrows},
     )
     defaults.update(kwargs)
     return plt.subplots(nrows, 1, **defaults)
@@ -253,22 +328,53 @@ def shade_regime(ax, x_start, x_end, color, alpha=0.06, label=None) -> None:
     ax.axvspan(x_start, x_end, alpha=alpha, color=color, label=label)
 
 
-def regime_annotations(ax, xlim, ylim) -> None:
-    """Rótulos MMMFEM / MHM num eixo de varredura de α."""
-    ybot = ylim[0] * 2 if ylim[0] > 0 else 1e-10
-    ax.text(3e-3, ybot, r"MMMFEM ($\alpha\!\to\!0$)",
-            fontsize=8, color=C["regime_mmmfem"], ha="center", alpha=0.7)
-    ax.text(3e3, ybot, r"MHM ($\alpha\!\to\!\infty$)",
-            fontsize=8, color=C["regime_mhm"], ha="center", alpha=0.7)
+def regime_annotations(ax, alpha_lo: float = 1e-2, alpha_hi: float = 1e2,
+                       fontsize: float = 7.5) -> None:
+    """Faixas sombreadas e rótulos dos regimes-limite num eixo de α.
+
+    O argumento da figura de varredura de α é que a curva SATURA nas duas
+    pontas, isto é, que a varredura cobre os regimes-limite inteiros e não
+    um trecho do meio. As faixas mostram onde cada limite vale: abaixo de
+    ``alpha_lo`` o MRCM tende ao MMMFEM, acima de ``alpha_hi`` tende ao MHM.
+
+    Chamar DEPOIS de traçar as curvas: os limites do eixo são lidos daqui, e
+    as faixas são fixadas com `axvspan`, que acompanha o eixo y.
+    """
+    x0, x1 = ax.get_xlim()
+    ax.axvspan(x0, alpha_lo, color=C["regime_mmmfem"], alpha=0.07, zorder=0)
+    ax.axvspan(alpha_hi, x1, color=C["regime_mhm"], alpha=0.07, zorder=0)
+    # Os rótulos vão ACIMA do eixo, e não dentro: dentro eles caíam sobre a
+    # curva de velocidade, que satura justamente nas duas pontas — isto é,
+    # exatamente onde as faixas estão.
+    for x, texto, cor in (
+            (math.sqrt(max(x0, 1e-300) * alpha_lo),
+             r"MMMFEM ($\alpha\!\to\!0$)", C["regime_mmmfem"]),
+            (math.sqrt(alpha_hi * x1),
+             r"MHM ($\alpha\!\to\!\infty$)", C["regime_mhm"])):
+        ax.text(x, 1.01, texto, transform=ax.get_xaxis_transform(),
+                fontsize=fontsize, color=cor, ha="center", va="bottom",
+                alpha=0.9)
+    ax.set_xlim(x0, x1)
 
 
 def save_figure(fig, study_id: str, name: str) -> Path:
-    """Grava PDF (300 dpi) e PNG (200 dpi) em `studies/<study_id>/plots/`."""
-    plot_dir = _plots_dir
+    """Grava PDF (300 dpi) e PNG (200 dpi) em `studies/<study_id>/plots/`.
+
+    Grava com a página IGUAL ao ``figsize``. Sem ``bbox_inches="tight"``:
+    recortar a página para a tinta desenhada descarta a trava de largura e
+    faz cada figura chegar ao documento com um fator de escala diferente.
+    """
+    plot_dir = paths.plots_dir(study_id)
     out = plot_dir / f"{name}.pdf"
+    largura = fig.get_figwidth()
+    if not any(abs(largura - v) < 1e-6 for v in FIG_W.values()):
+        raise ValueError(
+            f"{name}: largura {largura:.3f} in não é nenhuma de "
+            f"{sorted(FIG_W.values())}; a figura não foi criada por "
+            f"new_figure/stacked_panels")
     for ext, dpi in (("pdf", 300), ("png", 200)):
         path = plot_dir / f"{name}.{ext}"
-        fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        fig.savefig(path, dpi=dpi)
         print(f"  gravado: {path}")
     plt.close(fig)
     return out
@@ -330,22 +436,33 @@ def _ajustar_rotulos_log(eixo, valores) -> None:
 
 
 def shared_legend(fig, ax, ncol: int = 4, title: str | None = None,
-                  bottom: float = 0.20, fontsize: float = 8.0) -> None:
+                  fontsize: float = 8.0,
+                  loc: str = "outside lower center") -> None:
     """Legenda única abaixo dos painéis, retirada de `ax`.
 
     Quando há muitas curvas (os sete pares de graus de interface, por
     exemplo), a legenda dentro do painel cobre justamente as curvas que o
     leitor precisa ver. Aqui ela sai para fora e serve os dois painéis, que
     partilham as mesmas séries.
+
+    ``loc`` só deve sair do valor padrão quando o pé da figura já estiver
+    ocupado: o layout restrito reserva UMA faixa inferior, e um `supxlabel`
+    dividiria essa faixa com a legenda, imprimindo um sobre o outro. Nesse
+    caso use ``"outside upper center"``.
     """
     handles, labels = ax.get_legend_handles_labels()
-    leg = ax.get_legend()
-    if leg is not None:
-        leg.remove()
-    fig.legend(handles, labels, loc="upper center", ncol=ncol,
-               fontsize=fontsize, title=title, frameon=True,
-               bbox_to_anchor=(0.5, 0.06))
-    fig.subplots_adjust(bottom=bottom)
+    # Remove a legenda de TODOS os painéis, e não só a de `ax`: as séries são
+    # as mesmas em todos, e a que sobrasse num painel vizinho seria uma cópia
+    # da legenda compartilhada, cobrindo justamente as curvas.
+    for outro in fig.axes:
+        leg = outro.get_legend()
+        if leg is not None:
+            leg.remove()
+    # `loc="outside lower center"` é reservado ao layout restrito, que abre
+    # espaço para a legenda dentro do figsize. `subplots_adjust`, que estava
+    # aqui antes, DESLIGA o layout restrito e devolve a colisão de rótulos.
+    fig.legend(handles, labels, loc=loc, ncol=ncol,
+               fontsize=fontsize, title=title, frameon=True)
 
 
 def stacked_bars(ax, categories, parts, labels, colors=None) -> None:

@@ -23,12 +23,12 @@ rank = comm.rank
 n_ranks = comm.size
 
 OUTDIR      = "frames_von_karman_hires"
-GIF_OUT     = "results_alpha/von_karman_U5P5_15_5x2.gif"
+GIF_OUT     = "results_alpha/von_karman_U4P4_40_3x3.gif"
 FPS         = 10
 FRAME_EVERY = 12
-Ndomx, Ndomy, nloc =6, 3, 15       # 160×80 cells, hx=hy=0.1, square cells
-dU, dP      = 5, 5                   # U_H,2 / P_H,2
-T           = 40.0
+Ndomx, Ndomy, nloc =3, 3,60       # 160×80 cells, hx=hy=0.1, square cells
+dU, dP      = 3, 3                   # U_H,2 / P_H,2
+T           = 20.0
 # Obstacle centered at (4,4) — fits in subdomain (interfaces at x=1.6,3.2,4.8,... y=1.6,3.2,4.8,...)
 # bbox x=[3.5,4.5] ⊂ [3.2,4.8] ✓  bbox y=[3.5,4.5] ⊂ [3.2,4.8] ✓
 XC, YC      = 4.0, 4.0

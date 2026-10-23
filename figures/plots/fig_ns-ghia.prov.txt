@@ -1,0 +1,30 @@
+figura:  fig_ns-ghia
+secao:   5.7.4
+estudo:  NavierStokes (bloco de projecao)
+fontes:
+  - results_alpha/cavity_ghia/ghia_validation.json
+  - tests/test_cavity_ghia.py
+git_sha (figura, arvore que desenhou): 7fc28a0-dirty
+
+erro medido: tabelas de Ghia et al. (1982)
+eixo x:  u (linha de cima) e x (linha de baixo), ambos lineares
+eixo y:  y (linha de cima) e v (linha de baixo), ambos lineares
+paineis: colunas por Reynolds: (a)/(d) Re=100, (b)/(e) Re=400, (c)/(f) Re=1000
+
+campos consumidos:
+  - cases[].Re
+  - cases[].y_u
+  - cases[].u_profile
+  - cases[].x_v
+  - cases[].v_profile
+  - GHIA_U
+  - GHIA_V
+
+excluidos pelo crivo:
+  - wall_s e timings: custo nao e afirmacao de nenhuma destas tres figuras
+  - rss_peak_mb: memoria residente, usada para dimensionar a campanha
+  - n_iter do solver linear: diagnostico de implementacao, nao de metodo
+  - campo de vorticidade e linhas de corrente: nao ha valor tabelado correspondente em Ghia1982 com que compara-los, e a figura existe para a comparacao
+
+o que a legenda precisa dizer:
+  Perfis sobre as linhas de centro da cavidade com tampa deslizante, contra os valores tabelados por Ghia1982. Malha 128x128 com decomposicao 8x8, resolucao comparavel a 129x129 daqueles autores. Os eixos seguem a convencao de Ghia, com a velocidade no eixo horizontal do perfil vertical. Os valores tabelados vem de tests/test_cavity_ghia.py, que e a fonte unica e versionada.

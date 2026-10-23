@@ -6,3 +6,6 @@ frames_mprm/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Ferramentas
+.claude/
